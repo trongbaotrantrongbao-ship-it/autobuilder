@@ -1,4 +1,5 @@
 {
-  "key.autobuilder.toggle": "Bật/tắt AutoBuilder",
+  "key.autobuilder.toggle": "Bật/tắt xây",
+  "key.autobuilder.menu": "Mở menu AutoBuilder",
   "key.category.autobuilder.main": "AutoBuilder"
 }

@@ -5,28 +5,45 @@ import net.fabricmc.loader.api.FabricLoader;
 import java.io.IOException;
 import java.io.Reader;
 import java.io.Writer;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Properties;
 
-/** Cấu hình lưu ở config/autobuilder.properties (UTF-8). */
+/** Cấu hình lưu ở config/autobuilder.properties (UTF-8). Mọi field public static được tự lưu/nạp. */
 public final class Config {
-    public static int scanRadius = 32;        // bán kính quét ngang quanh người chơi
-    public static int scanHeight = 24;        // quét lên/xuống bao nhiêu block
-    public static int delayTicks = 3;         // số tick giữa 2 hành động
-    public static int maxAttempts = 4;        // số lần thử đặt/đổ nước trước khi bỏ qua
-    public static int ackTicks = 6;           // chờ server phản hồi sau mỗi hành động
-    public static int swapHotbarSlot = 8;     // ô hotbar (0-8) dùng để hoán đổi đồ từ kho
-    public static double reach = 4.4;         // tầm với tối đa
-    public static boolean autoBuy = true;     // tự mua đồ thiếu qua /ah
-    public static double maxPricePerListing = 2_000_000;
-    public static int buyMaxTries = 3;
+    // ---- phạm vi quét
+    public static int scanRadius = 32;        // nửa cạnh vùng quét (X/Z)
+    public static int scanUp = 24;            // quét lên trên bao nhiêu block
+    public static int scanDown = 8;           // quét xuống dưới bao nhiêu block
+    public static boolean lockAnchor = false; // khóa tâm vùng quét tại một điểm
+    public static int anchorX = 0, anchorY = 64, anchorZ = 0;
+    public static boolean showFrame = true;   // hiện khung phạm vi trong thế giới
 
-    public static String ahCommand = "ah search %s";   // %s = tên tiếng Anh của item
-    public static String resultTitle = "tìm kiếm";      // tiêu đề menu kết quả (viết thường)
-    public static String confirmTitle = "xác nhận";     // tiêu đề menu xác nhận
-    public static String confirmButtonName = "đồng ý";  // tên nút xanh xác nhận
+    // ---- tốc độ
+    public static int delayTicks = 3;         // delay giữa 2 lần đặt block (tick, 20 tick = 1 giây)
+    public static int adjustDelayTicks = 4;   // delay giữa các lần chỉnh (repeater, comparator...)
+    public static int ackTicks = 6;           // chờ server phản hồi sau mỗi lần đặt
+    public static int maxAttempts = 4;
+
+    // ---- hành vi
+    public static boolean rotateHead = true;  // xoay đầu thật theo hướng đặt
+    public static boolean autoMove = true;    // tự đi tới block cần đặt
+    public static boolean autoBuy = true;     // tự mua đồ thiếu qua /ah (sau khi đã đồng ý báo giá)
+    public static double reach = 4.4;
+    public static int swapHotbarSlot = 8;
+    public static boolean previewSpin = true;
+
+    // ---- /ah
+    public static double maxPricePerListing = 5_000_000;
+    public static double budgetFactor = 1.25; // cho phép chi vượt báo giá tối đa 25%
+    public static int buyMaxTries = 3;
+    public static String ahCommand = "ah search %s";
+    public static String resultTitle = "tìm kiếm";
+    public static String confirmTitle = "xác nhận";
+    public static String confirmButtonName = "đồng ý";
     public static String scaffoldItems = "minecraft:cobblestone,minecraft:dirt,minecraft:netherrack";
 
     private static Path file() {
@@ -34,61 +51,50 @@ public final class Config {
     }
 
     public static void load() {
-        Path f = file();
         Properties p = new Properties();
+        Path f = file();
         if (Files.exists(f)) {
-            try (Reader r = Files.newBufferedReader(f, StandardCharsets.UTF_8)) {
-                p.load(r);
-            } catch (IOException ignored) {}
+            try (Reader r = Files.newBufferedReader(f, StandardCharsets.UTF_8)) { p.load(r); } catch (IOException ignored) {}
         }
-        scanRadius = i(p, "scanRadius", scanRadius);
-        scanHeight = i(p, "scanHeight", scanHeight);
-        delayTicks = Math.max(1, i(p, "delayTicks", delayTicks));
-        maxAttempts = i(p, "maxAttempts", maxAttempts);
-        ackTicks = i(p, "ackTicks", ackTicks);
-        swapHotbarSlot = Math.max(0, Math.min(8, i(p, "swapHotbarSlot", swapHotbarSlot)));
-        reach = d(p, "reach", reach);
-        autoBuy = Boolean.parseBoolean(p.getProperty("autoBuy", String.valueOf(autoBuy)));
-        maxPricePerListing = d(p, "maxPricePerListing", maxPricePerListing);
-        buyMaxTries = i(p, "buyMaxTries", buyMaxTries);
-        ahCommand = p.getProperty("ahCommand", ahCommand);
-        resultTitle = p.getProperty("resultTitle", resultTitle).toLowerCase();
-        confirmTitle = p.getProperty("confirmTitle", confirmTitle).toLowerCase();
-        confirmButtonName = p.getProperty("confirmButtonName", confirmButtonName).toLowerCase();
-        scaffoldItems = p.getProperty("scaffoldItems", scaffoldItems);
+        for (Field fd : Config.class.getDeclaredFields()) {
+            if (!Modifier.isStatic(fd.getModifiers()) || !Modifier.isPublic(fd.getModifiers())) continue;
+            String v = p.getProperty(fd.getName());
+            if (v == null) continue;
+            try {
+                Class<?> t = fd.getType();
+                if (t == int.class) fd.setInt(null, Integer.parseInt(v.trim()));
+                else if (t == double.class) fd.setDouble(null, Double.parseDouble(v.trim()));
+                else if (t == boolean.class) fd.setBoolean(null, Boolean.parseBoolean(v.trim()));
+                else if (t == String.class) fd.set(null, v);
+            } catch (Exception ignored) {}
+        }
+        clamp();
+        resultTitle = resultTitle.toLowerCase();
+        confirmTitle = confirmTitle.toLowerCase();
+        confirmButtonName = confirmButtonName.toLowerCase();
         save();
     }
 
+    public static void clamp() {
+        scanRadius = Math.max(4, Math.min(96, scanRadius));
+        scanUp = Math.max(0, Math.min(96, scanUp));
+        scanDown = Math.max(0, Math.min(96, scanDown));
+        delayTicks = Math.max(1, Math.min(40, delayTicks));
+        adjustDelayTicks = Math.max(1, Math.min(40, adjustDelayTicks));
+        swapHotbarSlot = Math.max(0, Math.min(8, swapHotbarSlot));
+        reach = Math.max(2.5, Math.min(5.0, reach));
+    }
+
     public static void save() {
+        clamp();
         Properties p = new Properties();
-        p.setProperty("scanRadius", String.valueOf(scanRadius));
-        p.setProperty("scanHeight", String.valueOf(scanHeight));
-        p.setProperty("delayTicks", String.valueOf(delayTicks));
-        p.setProperty("maxAttempts", String.valueOf(maxAttempts));
-        p.setProperty("ackTicks", String.valueOf(ackTicks));
-        p.setProperty("swapHotbarSlot", String.valueOf(swapHotbarSlot));
-        p.setProperty("reach", String.valueOf(reach));
-        p.setProperty("autoBuy", String.valueOf(autoBuy));
-        p.setProperty("maxPricePerListing", String.valueOf(maxPricePerListing));
-        p.setProperty("buyMaxTries", String.valueOf(buyMaxTries));
-        p.setProperty("ahCommand", ahCommand);
-        p.setProperty("resultTitle", resultTitle);
-        p.setProperty("confirmTitle", confirmTitle);
-        p.setProperty("confirmButtonName", confirmButtonName);
-        p.setProperty("scaffoldItems", scaffoldItems);
+        for (Field fd : Config.class.getDeclaredFields()) {
+            if (!Modifier.isStatic(fd.getModifiers()) || !Modifier.isPublic(fd.getModifiers())) continue;
+            try { p.setProperty(fd.getName(), String.valueOf(fd.get(null))); } catch (Exception ignored) {}
+        }
         try (Writer w = Files.newBufferedWriter(file(), StandardCharsets.UTF_8)) {
             p.store(w, "AutoBuilder config");
         } catch (IOException ignored) {}
-    }
-
-    private static int i(Properties p, String k, int def) {
-        try { return Integer.parseInt(p.getProperty(k, String.valueOf(def)).trim()); }
-        catch (Exception e) { return def; }
-    }
-
-    private static double d(Properties p, String k, double def) {
-        try { return Double.parseDouble(p.getProperty(k, String.valueOf(def)).trim()); }
-        catch (Exception e) { return def; }
     }
 
     private Config() {}

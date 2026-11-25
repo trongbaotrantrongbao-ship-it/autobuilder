@@ -60,8 +60,10 @@ public final class Util {
 
     public static void look(MinecraftClient mc, float yaw, float pitch) {
         ClientPlayerEntity p = mc.player;
-        p.setYaw(yaw);
-        p.setPitch(pitch);
+        if (Config.rotateHead) { // xoay đầu thật (nhìn thấy được); nếu tắt thì chỉ gửi hướng cho server
+            p.setYaw(yaw);
+            p.setPitch(pitch);
+        }
         p.networkHandler.sendPacket(new PlayerMoveC2SPacket.LookAndOnGround(yaw, pitch, p.isOnGround(), p.horizontalCollision));
     }
 
@@ -96,6 +98,13 @@ public final class Util {
     /** minecraft:oak_planks -> "oak planks" (tên tiếng Anh dùng cho /ah search). */
     public static String englishName(Item item) {
         return Registries.ITEM.getId(item).getPath().replace('_', ' ');
+    }
+
+    public static String money(double v) {
+        if (v >= 1e9) return String.format(java.util.Locale.ROOT, "$%.2fB", v / 1e9);
+        if (v >= 1e6) return String.format(java.util.Locale.ROOT, "$%.2fM", v / 1e6);
+        if (v >= 1e3) return String.format(java.util.Locale.ROOT, "$%.1fK", v / 1e3);
+        return "$" + (long) v;
     }
 
     public static void status(MinecraftClient mc, String msg) {
