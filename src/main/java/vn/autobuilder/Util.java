@@ -5,7 +5,8 @@ import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
-import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket;
+import net.minecraft.network.packet.c2s.play.PlayerInputC2SPacket;
+import net.minecraft.util.PlayerInput;
 import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
 import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket;
 import net.minecraft.registry.Registries;
@@ -24,8 +25,8 @@ public final class Util {
     public static int count(ClientPlayerEntity p, Item item) {
         int c = 0;
         PlayerInventory inv = p.getInventory();
-        for (int i = 0; i < inv.main.size(); i++) {
-            ItemStack s = inv.main.get(i);
+        for (int i = 0; i < inv.getMainStacks().size(); i++) {
+            ItemStack s = inv.getMainStacks().get(i);
             if (s.isOf(item)) c += s.getCount();
         }
         return c;
@@ -37,9 +38,9 @@ public final class Util {
         PlayerInventory inv = p.getInventory();
 
         for (int i = 0; i < 9; i++) {
-            if (inv.main.get(i).isOf(item)) {
-                if (inv.selectedSlot != i) {
-                    inv.selectedSlot = i;
+            if (inv.getMainStacks().get(i).isOf(item)) {
+                if (inv.getSelectedSlot() != i) {
+                    inv.setSelectedSlot(i);
                     p.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(i));
                     return Sel.WAIT;
                 }
@@ -47,7 +48,7 @@ public final class Util {
             }
         }
         for (int i = 9; i < 36; i++) {
-            if (inv.main.get(i).isOf(item)) {
+            if (inv.getMainStacks().get(i).isOf(item)) {
                 // ô 9..35 của PlayerScreenHandler trùng chỉ số kho; SWAP với hotbar
                 mc.interactionManager.clickSlot(p.playerScreenHandler.syncId, i, Config.swapHotbarSlot,
                         SlotActionType.SWAP, p);
@@ -61,7 +62,7 @@ public final class Util {
         ClientPlayerEntity p = mc.player;
         p.setYaw(yaw);
         p.setPitch(pitch);
-        p.networkHandler.sendPacket(new PlayerMoveC2SPacket.LookAndOnGround(yaw, pitch, p.isOnGround()));
+        p.networkHandler.sendPacket(new PlayerMoveC2SPacket.LookAndOnGround(yaw, pitch, p.isOnGround(), p.horizontalCollision));
     }
 
     public static void lookAt(MinecraftClient mc, Vec3d target) {
@@ -77,13 +78,13 @@ public final class Util {
         ClientPlayerEntity p = mc.player;
         if (sneak) {
             p.setSneaking(true);
-            p.networkHandler.sendPacket(new ClientCommandC2SPacket(p, ClientCommandC2SPacket.Mode.PRESS_SHIFT_KEY));
+            p.networkHandler.sendPacket(new PlayerInputC2SPacket(new PlayerInput(false, false, false, false, false, true, false)));
         }
         ActionResult r = mc.interactionManager.interactBlock(p, Hand.MAIN_HAND, hit);
         if (r.shouldSwingHand()) p.swingHand(Hand.MAIN_HAND);
         if (sneak) {
             p.setSneaking(false);
-            p.networkHandler.sendPacket(new ClientCommandC2SPacket(p, ClientCommandC2SPacket.Mode.RELEASE_SHIFT_KEY));
+            p.networkHandler.sendPacket(new PlayerInputC2SPacket(new PlayerInput(false, false, false, false, false, false, false)));
         }
     }
 

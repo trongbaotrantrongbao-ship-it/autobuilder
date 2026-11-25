@@ -180,7 +180,7 @@ public final class Builder {
 
     private void doPlace(MinecraftClient mc, WorldSchematic sw, BlockPos pos, BlockState schem, boolean secondSlab) {
         ClientWorld w = mc.world;
-        ItemStack pick = schem.getBlock().getPickStack(sw, pos, schem);
+        ItemStack pick = schem.getBlock().getPickStack(sw, pos, schem, false);
         Item item = pick.isEmpty() ? schem.getBlock().asItem() : pick.getItem();
         if (item == Items.AIR) { blacklist.add(pos); return; }
 

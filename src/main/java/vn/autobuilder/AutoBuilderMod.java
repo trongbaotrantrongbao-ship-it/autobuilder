@@ -21,7 +21,8 @@ public class AutoBuilderMod implements ClientModInitializer {
         Config.load();
 
         toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-                "key.autobuilder.toggle", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_K, "category.autobuilder"));
+                "key.autobuilder.toggle", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_K,
+                KeyBinding.Category.create(net.minecraft.util.Identifier.of("autobuilder", "main"))));
 
         ClientTickEvents.END_CLIENT_TICK.register(mc -> {
             while (toggleKey.wasPressed()) BUILDER.setEnabled(mc, !BUILDER.isEnabled());

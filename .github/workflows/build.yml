@@ -22,11 +22,21 @@ jobs:
         with:
           gradle-version: 9.2.0
 
-      - name: Download Litematica + MaLiLib (Fabric 1.21.1) from Modrinth
+      - name: Resolve latest Yarn / Loader / Fabric API for 1.21.11
+        run: |
+          MC=1.21.11
+          yarn=$(curl -s "https://meta.fabricmc.net/v2/versions/yarn/$MC" | jq -r '.[0].version')
+          loader=$(curl -s "https://meta.fabricmc.net/v2/versions/loader" | jq -r '[.[]|select(.stable)][0].version')
+          fapi=$(curl -s "https://api.modrinth.com/v2/project/fabric-api/version?game_versions=%5B%22$MC%22%5D&loaders=%5B%22fabric%22%5D" | jq -r '.[0].version_number')
+          echo "yarn=$yarn loader=$loader fabric-api=$fapi"
+          sed -i "s|^yarn_mappings=.*|yarn_mappings=$yarn|; s|^loader_version=.*|loader_version=$loader|; s|^fabric_version=.*|fabric_version=$fapi|" gradle.properties
+          cat gradle.properties
+
+      - name: Download Litematica + MaLiLib (Fabric 1.21.11) from Modrinth
         run: |
           mkdir -p libs
           for slug in litematica malilib; do
-            url=$(curl -s "https://api.modrinth.com/v2/project/$slug/version?game_versions=%5B%221.21.1%22%5D&loaders=%5B%22fabric%22%5D" \
+            url=$(curl -s "https://api.modrinth.com/v2/project/$slug/version?game_versions=%5B%221.21.11%22%5D&loaders=%5B%22fabric%22%5D" \
               | jq -r '.[0].files[] | select(.primary==true) | .url' | head -n1)
             echo "$slug -> $url"
             curl -sL "$url" -o "libs/$slug.jar"
@@ -49,4 +59,4 @@ jobs:
           tag="build-${{ github.run_number }}"
           gh release create "$tag" build/libs/autobuilder-*.jar \
             --title "AutoBuilder build ${{ github.run_number }}" \
-            --notes "Jar tự build từ commit ${{ github.sha }}. Cần Fabric API + Litematica + MaLiLib (MC 1.21.1)."
+            --notes "Jar tự build từ commit ${{ github.sha }}. Cần Fabric API + Litematica + MaLiLib (MC 1.21.11)."
