@@ -81,7 +81,7 @@ public final class Util {
             p.networkHandler.sendPacket(new PlayerInputC2SPacket(new PlayerInput(false, false, false, false, false, true, false)));
         }
         ActionResult r = mc.interactionManager.interactBlock(p, Hand.MAIN_HAND, hit);
-        if (r.shouldSwingHand()) p.swingHand(Hand.MAIN_HAND);
+        if (r.isAccepted()) p.swingHand(Hand.MAIN_HAND);
         if (sneak) {
             p.setSneaking(false);
             p.networkHandler.sendPacket(new PlayerInputC2SPacket(new PlayerInput(false, false, false, false, false, false, false)));
@@ -90,7 +90,7 @@ public final class Util {
 
     public static void useItem(MinecraftClient mc) {
         ActionResult r = mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
-        if (r.shouldSwingHand()) mc.player.swingHand(Hand.MAIN_HAND);
+        if (r.isAccepted()) mc.player.swingHand(Hand.MAIN_HAND);
     }
 
     /** minecraft:oak_planks -> "oak planks" (tên tiếng Anh dùng cho /ah search). */

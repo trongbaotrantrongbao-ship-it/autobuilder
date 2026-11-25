@@ -92,7 +92,7 @@ public final class Builder {
         BlockPos c = mc.player.getBlockPos();
         int r = Config.scanRadius, hh = Config.scanHeight;
         int minY = Math.max(w.getBottomY(), c.getY() - hh);
-        int maxY = Math.min(w.getTopY() - 1, c.getY() + hh);
+        int maxY = Math.min(w.getBottomY() + w.getHeight() - 1, c.getY() + hh);
 
         List<BlockPos> found = new ArrayList<>();
         BlockPos.Mutable m = new BlockPos.Mutable();
@@ -180,7 +180,7 @@ public final class Builder {
 
     private void doPlace(MinecraftClient mc, WorldSchematic sw, BlockPos pos, BlockState schem, boolean secondSlab) {
         ClientWorld w = mc.world;
-        ItemStack pick = schem.getBlock().getPickStack(sw, pos, schem, false);
+        ItemStack pick = schem.getPickStack(sw, pos, false);
         Item item = pick.isEmpty() ? schem.getBlock().asItem() : pick.getItem();
         if (item == Items.AIR) { blacklist.add(pos); return; }
 
