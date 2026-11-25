@@ -51,6 +51,28 @@ jobs:
           name: autobuilder-jar
           path: build/libs/*.jar
 
+      - name: API dump (debug)
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          echo "### fabric rendering jars"
+          find ~/.gradle -name "fabric-rendering-v1*.jar" -not -name "*sources*" | head -3
+          FJ=$(find ~/.gradle -name "fabric-rendering-v1*.jar" -not -name "*sources*" | head -1)
+          unzip -l "$FJ" | grep -iE "WorldRender|world/" | awk '{print $4}' | head -40
+          for c in $(unzip -l "$FJ" | awk '{print $4}' | grep -E "world/WorldRender(Events|Context|State)?\.class$|world/.*Events\.class$" | sed 's/\.class$//; s#/#.#g'); do echo "--- $c"; javap -public -cp "$FJ" "$c"; done
+          echo "### minecraft jars"
+          find ~/.gradle -path "*fabric-loom*" -name "*.jar" | grep -v sources | head -20
+          MJ=$(find ~/.gradle -path "*minecraftMaven*" -name "*.jar" | grep -v sources | head -1)
+          echo "MJ=$MJ"
+          for c in net.minecraft.client.render.VertexRendering net.minecraft.client.gui.Click net.minecraft.client.input.KeyInput net.minecraft.client.render.RenderLayer; do echo "--- $c"; javap -public -cp "$MJ" "$c" | head -60; done
+          echo "--- Screen mouse/key methods"
+          javap -public -cp "$MJ" net.minecraft.client.gui.screen.Screen | grep -E "mouse|key|render|shouldPause|init\(|close"
+          echo "--- DrawContext"
+          javap -public -cp "$MJ" net.minecraft.client.gui.DrawContext | grep -E " fill| drawText| drawBorder| drawCenteredText| fillGradient"
+          echo "--- KeyBinding"
+          javap -public -cp "$MJ" net.minecraft.client.option.KeyBinding | grep -E "KeyBinding\(|Category|setPressed"
+
       - name: Publish jar to Releases
         if: github.ref == 'refs/heads/main'
         env:
