@@ -17,7 +17,7 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 8.10.2
+          gradle-version: 9.2.0
 
       - name: Download Litematica + MaLiLib (Fabric 1.21.1) from Modrinth
         run: |
