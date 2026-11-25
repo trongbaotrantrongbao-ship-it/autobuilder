@@ -1,0 +1,39 @@
+name: Build mod
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.10.2
+
+      - name: Download Litematica + MaLiLib (Fabric 1.21.1) from Modrinth
+        run: |
+          mkdir -p libs
+          for slug in litematica malilib; do
+            url=$(curl -s "https://api.modrinth.com/v2/project/$slug/version?game_versions=%5B%221.21.1%22%5D&loaders=%5B%22fabric%22%5D" \
+              | jq -r '.[0].files[] | select(.primary==true) | .url' | head -n1)
+            echo "$slug -> $url"
+            curl -sL "$url" -o "libs/$slug.jar"
+          done
+          ls -la libs
+
+      - name: Build
+        run: gradle build --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: autobuilder-jar
+          path: build/libs/*.jar
