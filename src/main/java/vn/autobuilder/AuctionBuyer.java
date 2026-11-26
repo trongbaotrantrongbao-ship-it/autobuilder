@@ -11,6 +11,7 @@ import net.minecraft.screen.GenericContainerScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.Text;
 
+import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -74,19 +75,24 @@ public final class AuctionBuyer {
     public void tick(MinecraftClient mc) {
         if (!busy() || mc.player == null) return;
         timer++;
-        if (timer > (quote ? 120 : 240)) { fail(mc, "hết thời gian chờ menu /ah"); return; }
+        if (timer > (quote ? 120 : 240)) { fail(mc, "hết thời gian chờ menu /ah | " + describe(mc)); return; }
 
         if (!(mc.currentScreen instanceof GenericContainerScreen gcs)) return;
         GenericContainerScreenHandler h = gcs.getScreenHandler();
-        String title = gcs.getTitle().getString().toLowerCase(Locale.ROOT);
+        String title = norm(gcs.getTitle().getString());
 
         switch (phase) {
             case WAIT_RESULTS -> {
-                if (title.contains(Config.confirmTitle)) { phase = Phase.WAIT_CONFIRM; timer = 0; return; }
-                if (!title.contains(Config.resultTitle) || timer < 5) return;
+                if (title.contains(norm(Config.confirmTitle))) { phase = Phase.WAIT_CONFIRM; timer = 0; return; }
+                if (timer < 5) return;
+                // nhận diện menu kết quả theo tiêu đề, hoặc theo nội dung (có món cần tìm) nếu tiêu đề lạ
+                if (!title.contains(norm(Config.resultTitle)) && !hasWanted(h)) return;
 
                 int[] pg = page(title);                       // {trang hiện tại, tổng số trang}
-                if (expectPage > 0 && pg != null && pg[0] != expectPage) return; // chờ trang mới tải xong
+                if (expectPage > 0 && pg != null && pg[0] != expectPage) { // chờ trang mới tải xong
+                    if (timer < 40) return;
+                    pagesVisited = Config.maxPages;           // bấm mà không chuyển trang -> thôi, dùng trang hiện tại
+                }
                 expectPage = 0;
 
                 int fullSize = new ItemStack(want).getMaxCount();   // "stack đầy" (64, hoặc 16, 1...)
@@ -133,22 +139,9 @@ public final class AuctionBuyer {
                 timer = 0;
             }
             case WAIT_CONFIRM -> {
-                if (!title.contains(Config.confirmTitle) || timer < 4) return;
-                int btn = -1;
-                for (int i = 0; i < h.getRows() * 9; i++) {
-                    ItemStack s = h.getSlot(i).getStack();
-                    if (s.isEmpty()) continue;
-                    String name = s.getName().getString().toLowerCase(Locale.ROOT);
-                    if (name.contains(Config.confirmButtonName) || name.contains("dong y")) { btn = i; break; }
-                }
-                if (btn < 0) {
-                    for (int i = 0; i < h.getRows() * 9; i++) {
-                        ItemStack s = h.getSlot(i).getStack();
-                        if (s.isEmpty()) continue;
-                        String id = Registries.ITEM.getId(s.getItem()).getPath();
-                        if (id.startsWith("lime_") || id.startsWith("green_")) { btn = i; break; }
-                    }
-                }
+                if (timer < 4) return;
+                if (!title.contains(norm(Config.confirmTitle)) && findConfirm(h, false) < 0) return;
+                int btn = findConfirm(h, true);
                 if (btn < 0) { fail(mc, "không thấy nút Đồng ý"); return; }
                 mc.interactionManager.clickSlot(h.syncId, btn, 0, SlotActionType.PICKUP, mc.player);
                 spent += pendingPrice;
@@ -166,6 +159,70 @@ public final class AuctionBuyer {
         }
     }
 
+
+
+    /** Bỏ dấu, bỏ mã màu, chữ nhỏ-hoa (ᴛɪᴍ) -> chữ thường không dấu, để so khớp bền với mọi kiểu gõ của server. */
+    static String norm(String in) {
+        if (in == null) return "";
+        StringBuilder sb = new StringBuilder();
+        for (char ch : in.toCharArray()) {
+            int k = "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘꞯʀꜱᴛᴜᴠᴡxʏᴢ".indexOf(ch);
+            sb.append(k >= 0 ? (char) ('a' + k) : ch);
+        }
+        String n = Normalizer.normalize(sb.toString(), Normalizer.Form.NFD).replaceAll("\\p{M}+", "");
+        n = n.replaceAll("§.", "").toLowerCase(Locale.ROOT).replace('đ', 'd');
+        return n;
+    }
+
+    private boolean hasWanted(GenericContainerScreenHandler h) {
+        for (int i = 0; i < h.getRows() * 9; i++) {
+            ItemStack st = h.getSlot(i).getStack();
+            if (!st.isEmpty() && st.isOf(want) && parsePrice(st) >= 0) return true;
+        }
+        return false;
+    }
+
+    /** Tìm nút "Đồng ý" theo tên; dự phòng ô xanh lá nếu allowColor. */
+    private int findConfirm(GenericContainerScreenHandler h, boolean allowColor) {
+        String target = norm(Config.confirmButtonName);
+        for (int i = 0; i < h.getRows() * 9; i++) {
+            ItemStack st = h.getSlot(i).getStack();
+            if (st.isEmpty()) continue;
+            if (norm(st.getName().getString()).contains(target)) return i;
+        }
+        if (allowColor) {
+            for (int i = 0; i < h.getRows() * 9; i++) {
+                ItemStack st = h.getSlot(i).getStack();
+                if (st.isEmpty()) continue;
+                String id = Registries.ITEM.getId(st.getItem()).getPath();
+                if (id.startsWith("lime_") || id.startsWith("green_")) return i;
+            }
+        }
+        return -1;
+    }
+
+    /** Mô tả menu đang mở để chẩn đoán khi lỗi. */
+    private String describe(MinecraftClient mc) {
+        if (!(mc.currentScreen instanceof GenericContainerScreen g)) {
+            return "không có menu rương nào đang mở (màn hình: "
+                    + (mc.currentScreen == null ? "không" : mc.currentScreen.getClass().getSimpleName()) + ")";
+        }
+        GenericContainerScreenHandler h = g.getScreenHandler();
+        int match = 0, priced = 0;
+        String lore = "";
+        for (int i = 0; i < h.getRows() * 9; i++) {
+            ItemStack st = h.getSlot(i).getStack();
+            if (st.isEmpty() || !st.isOf(want)) continue;
+            match++;
+            if (parsePrice(st) >= 0) priced++;
+            else if (lore.isEmpty()) {
+                LoreComponent l = st.get(DataComponentTypes.LORE);
+                lore = l == null ? "(không có lore)" : l.lines().stream().limit(4).map(Text::getString).reduce((a, b2) -> a + " / " + b2).orElse("");
+            }
+        }
+        return "tiêu đề='" + g.getTitle().getString() + "' hàng=" + h.getRows() + " khớp=" + match
+                + " đọc được giá=" + priced + (lore.isEmpty() ? "" : " lore mẫu=[" + lore + "]");
+    }
 
     /** Đọc "(1/8)" trong tiêu đề -> {1, 8}. null nếu không có. */
     private static int[] page(String title) {
@@ -201,8 +258,8 @@ public final class AuctionBuyer {
         if (lore == null) return -1;
         for (Text line : lore.lines()) {
             String t = line.getString();
-            String low = t.toLowerCase(Locale.ROOT);
-            if (!(low.contains("giá") || low.contains("gia") || low.contains("price") || t.contains("$"))) continue;
+            String low = norm(t);
+            if (!(low.contains("gia") || low.contains("price") || t.contains("$"))) continue;
             int dollar = t.indexOf('$');
             Matcher m = PRICE.matcher(dollar >= 0 ? t.substring(dollar + 1) : t);
             if (m.find()) {
