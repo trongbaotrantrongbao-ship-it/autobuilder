@@ -1,6 +1,7 @@
 package vn.autobuilder;
 
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.screen.ingame.GenericContainerScreen;
 import net.minecraft.component.DataComponentTypes;
 import net.minecraft.component.type.LoreComponent;
@@ -252,28 +253,46 @@ public final class AuctionBuyer {
         phase = Phase.IDLE;
     }
 
-    /** Đọc giá từ lore, vd "Giá: $ 150K" -> 150000. Trả -1 nếu không đọc được. */
+    /** Đọc giá từ đúng nội dung tooltip mà game hiện khi rê chuột vào món (lore + mọi dòng chú thích). */
     private static double parsePrice(ItemStack s) {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        List<String> lines = new ArrayList<>();
+        try {
+            for (Text t : Screen.getTooltipFromItem(mc, s)) lines.add(t.getString());
+        } catch (Throwable ignored) {}
         LoreComponent lore = s.get(DataComponentTypes.LORE);
-        if (lore == null) return -1;
-        for (Text line : lore.lines()) {
-            String t = line.getString();
+        if (lore != null) for (Text t : lore.lines()) lines.add(t.getString());
+
+        for (String t : lines) {
             String low = norm(t);
             if (!(low.contains("gia") || low.contains("price") || t.contains("$"))) continue;
-            int dollar = t.indexOf('$');
-            Matcher m = PRICE.matcher(dollar >= 0 ? t.substring(dollar + 1) : t);
-            if (m.find()) {
-                try {
-                    double v = Double.parseDouble(m.group(1).replace(",", ""));
-                    return switch (m.group(2).toLowerCase(Locale.ROOT)) {
-                        case "k" -> v * 1_000;
-                        case "m" -> v * 1_000_000;
-                        case "b" -> v * 1_000_000_000;
-                        default -> v;
-                    };
-                } catch (NumberFormatException ignored) {}
-            }
+            double v = firstMoney(t);
+            if (v >= 0) return v;
         }
+        // dự phòng: giá nằm ở thành phần dữ liệu khác của vật phẩm
+        try {
+            Matcher m = Pattern.compile("\\$\\s*(\\d[\\d.,]*)\\s*([kKmMbB]?)").matcher(s.getComponents().toString());
+            if (m.find()) return money(m.group(1), m.group(2));
+        } catch (Throwable ignored) {}
         return -1;
+    }
+
+    private static double firstMoney(String t) {
+        int dollar = t.indexOf('$');
+        Matcher m = PRICE.matcher(dollar >= 0 ? t.substring(dollar + 1) : t);
+        if (m.find()) return money(m.group(1), m.group(2));
+        return -1;
+    }
+
+    private static double money(String num, String suffix) {
+        try {
+            double v = Double.parseDouble(num.replace(",", ""));
+            return switch (suffix.toLowerCase(Locale.ROOT)) {
+                case "k" -> v * 1_000;
+                case "m" -> v * 1_000_000;
+                case "b" -> v * 1_000_000_000;
+                default -> v;
+            };
+        } catch (NumberFormatException e) { return -1; }
     }
 }

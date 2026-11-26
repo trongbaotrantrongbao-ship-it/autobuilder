@@ -49,6 +49,14 @@ public final class StateDiff {
         return out;
     }
 
+    private static final Set<String> SOFT = Set.of("shape", "north", "south", "east", "west", "up", "down", "hinge", "in_wall", "attached");
+
+    /** Chỉ lệch các thuộc tính phụ thuộc hàng xóm (hình dạng cầu thang, kết nối hàng rào...) -> vẫn coi là đúng. */
+    public static boolean softOnly(List<Property<?>> d) {
+        for (Property<?> p : d) if (!SOFT.contains(p.getName())) return false;
+        return true;
+    }
+
     public static boolean isDependentHalf(BlockState s) {
         if (s.contains(Properties.DOUBLE_BLOCK_HALF) && s.get(Properties.DOUBLE_BLOCK_HALF) == DoubleBlockHalf.UPPER)
             return true;

@@ -25,14 +25,14 @@ public final class Config {
     // ---- tốc độ
     public static int delayTicks = 3;         // delay giữa 2 lần đặt block (tick, 20 tick = 1 giây)
     public static int adjustDelayTicks = 4;   // delay giữa các lần chỉnh (repeater, comparator...)
-    public static int ackTicks = 6;           // chờ server phản hồi sau mỗi lần đặt
+    public static int ackTicks = 8;           // chờ server phản hồi sau mỗi lần đặt
     public static int maxAttempts = 4;
 
     // ---- hành vi
     public static boolean rotateHead = true;  // xoay đầu thật theo hướng đặt
     public static boolean autoMove = true;    // tự đi tới block cần đặt
     public static boolean autoBuy = true;     // tự mua đồ thiếu qua /ah (sau khi đã đồng ý báo giá)
-    public static double reach = 4.4;
+    public static double reach = 4.0;          // tối đa 4 block (không đặt xa hơn)
     public static int swapHotbarSlot = 8;
     public static boolean previewSpin = true;
 
@@ -84,7 +84,7 @@ public final class Config {
         delayTicks = Math.max(1, Math.min(40, delayTicks));
         adjustDelayTicks = Math.max(1, Math.min(40, adjustDelayTicks));
         swapHotbarSlot = Math.max(0, Math.min(8, swapHotbarSlot));
-        reach = Math.max(2.5, Math.min(5.0, reach));
+        reach = Math.max(2.5, Math.min(4.0, reach));
     }
 
     public static void save() {

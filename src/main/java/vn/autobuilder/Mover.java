@@ -2,78 +2,81 @@ package vn.autobuilder;
 
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
-import net.minecraft.registry.tag.FluidTags;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
-import net.minecraft.util.math.Vec3d;
 
-/** Tự đi tới gần block cần đặt: quay đầu, đi thẳng, nhảy khi vướng, dừng khi phía trước nguy hiểm. */
+import java.util.List;
+
+/** Đi theo đường BFS từng điểm một: quay đầu mượt, nhảy khi cần, phát hiện kẹt. */
 public final class Mover {
-    private BlockPos goal;
-    private boolean active;
-    private boolean pressedFwd, pressedJump, pressedSneak;
+    private List<BlockPos> path;
+    private int idx;
+    private boolean arrived, failed;
+    private boolean pressedFwd, pressedJump;
+    private int stuckTicks;
+    private double lastX, lastZ;
 
-    public boolean isActive() { return active; }
+    public boolean busy() { return path != null && !arrived && !failed; }
+    public boolean arrived() { return arrived; }
+    public boolean failed() { return failed; }
 
-    public void moveTo(BlockPos g) { goal = g; active = true; }
+    public void follow(List<BlockPos> p) {
+        path = p;
+        idx = 0;
+        arrived = p == null || p.isEmpty();
+        failed = false;
+        stuckTicks = 0;
+    }
 
-    public void release(MinecraftClient mc) {
-        active = false;
-        goal = null;
+    public void stop(MinecraftClient mc) {
+        path = null;
+        arrived = failed = false;
+        releaseKeys(mc);
+    }
+
+    public void holdJump(MinecraftClient mc, boolean on) {
+        if (mc.options == null) return;
+        mc.options.jumpKey.setPressed(on);
+        pressedJump = on;
+    }
+
+    private void releaseKeys(MinecraftClient mc) {
         if (mc.options == null) return;
         if (pressedFwd) { mc.options.forwardKey.setPressed(false); pressedFwd = false; }
         if (pressedJump) { mc.options.jumpKey.setPressed(false); pressedJump = false; }
-        if (pressedSneak) { mc.options.sneakKey.setPressed(false); pressedSneak = false; }
     }
 
     public void tick(MinecraftClient mc) {
-        if (!active || goal == null || mc.player == null) return;
+        if (!busy() || mc.player == null) return;
         ClientPlayerEntity p = mc.player;
-        Vec3d gc = Vec3d.ofCenter(goal);
+        BlockPos wp = path.get(idx);
+        boolean last = idx == path.size() - 1;
 
-        if (p.getEyePos().distanceTo(gc) <= Config.reach - 0.7) { release(mc); return; }
-
-        double dx = gc.x - p.getX(), dz = gc.z - p.getZ();
+        double cx = wp.getX() + 0.5, cz = wp.getZ() + 0.5;
+        double dx = cx - p.getX(), dz = cz - p.getZ();
         double hd = Math.sqrt(dx * dx + dz * dz);
-        float want = (float) (MathHelper.atan2(dz, dx) * 57.2957795 - 90.0);
-        float diff = MathHelper.wrapDegrees(want - p.getYaw());
-        p.setYaw(p.getYaw() + MathHelper.clamp(diff, -35f, 35f)); // quay đầu mượt
+        double tol = last ? 0.25 : 0.5;
 
-        boolean flying = p.getAbilities().flying;
-        boolean fwd = hd > 0.9 && Math.abs(diff) < 50 && (flying || safeAhead(mc, p));
-        boolean jump = false, sneak = false;
-
-        if (flying) {
-            double dy = gc.y - p.getEyeY();
-            jump = dy > 1.2;
-            sneak = dy < -2.5;
-        } else if (p.horizontalCollision && p.isOnGround()) {
-            jump = true;
-        }
-        if (!fwd && hd <= 0.9 && !flying) {
-            Util.status(mc, "Mục tiêu quá cao/thấp so với chỗ đứng – hãy tự di chuyển lại.");
-            release(mc);
+        if (hd <= tol && Math.abs(p.getY() - wp.getY()) < 1.0) {
+            idx++;
+            if (idx >= path.size()) { arrived = true; releaseKeys(mc); return; }
             return;
         }
-        set(mc, fwd, jump, sneak);
-    }
 
-    private void set(MinecraftClient mc, boolean fwd, boolean jump, boolean sneak) {
-        mc.options.forwardKey.setPressed(fwd);     pressedFwd = fwd;
-        mc.options.jumpKey.setPressed(jump);       pressedJump = jump;
-        mc.options.sneakKey.setPressed(sneak);     pressedSneak = sneak;
-    }
-
-    private boolean safeAhead(MinecraftClient mc, ClientPlayerEntity p) {
-        Vec3d dir = Vec3d.fromPolar(0f, p.getYaw());
-        BlockPos ahead = BlockPos.ofFloored(p.getX() + dir.x, p.getY(), p.getZ() + dir.z);
-        var w = mc.world;
-        if (w.getFluidState(ahead).isIn(FluidTags.LAVA)) return false;
-        for (int d = 1; d <= 3; d++) {
-            BlockPos q = ahead.down(d);
-            if (w.getFluidState(q).isIn(FluidTags.LAVA)) return false;
-            if (!w.getBlockState(q).isAir()) return true; // có nền (hoặc nước)
+        // kẹt: gần như không dịch chuyển trong 2 giây
+        if (++stuckTicks % 40 == 0) {
+            if (Math.hypot(p.getX() - lastX, p.getZ() - lastZ) < 0.15) { failed = true; releaseKeys(mc); return; }
+            lastX = p.getX(); lastZ = p.getZ();
         }
-        return false; // rơi quá 3 block
+        if (stuckTicks == 1) { lastX = p.getX(); lastZ = p.getZ(); }
+
+        float want = (float) (MathHelper.atan2(dz, dx) * 57.2957795 - 90.0);
+        float diff = MathHelper.wrapDegrees(want - p.getYaw());
+        p.setYaw(p.getYaw() + MathHelper.clamp(diff, -40f, 40f));
+
+        boolean fwd = Math.abs(diff) < 60 && !(last && hd < 0.45);
+        boolean jump = p.isOnGround() && (wp.getY() > p.getBlockPos().getY() || p.horizontalCollision);
+        mc.options.forwardKey.setPressed(fwd); pressedFwd = fwd;
+        mc.options.jumpKey.setPressed(jump);   pressedJump = jump;
     }
 }

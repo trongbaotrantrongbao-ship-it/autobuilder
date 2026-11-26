@@ -4,6 +4,7 @@ import fi.dy.masa.litematica.world.SchematicWorldHandler;
 import fi.dy.masa.litematica.world.WorldSchematic;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.enums.SlabType;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.world.ClientWorld;
@@ -13,15 +14,22 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.registry.Registries;
 import net.minecraft.state.property.Properties;
+import net.minecraft.util.Hand;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 
 import java.util.*;
 
-/** Bộ điều khiển chính: quét block ảo -> (báo giá) -> xây từng tầng từ dưới lên. */
+/**
+ * Bộ điều khiển chính. Mỗi block là 1 "nhiệm vụ" chạy theo các pha:
+ *   PLAN (lập kế hoạch) -> MOVE (đi tới chỗ đứng) -> AIM (quay đầu nhìn vào điểm bấm) -> bấm -> VERIFY (kiểm tra đã đặt chưa).
+ * Nếu chưa đặt được: ghi nhớ cách đã thử hỏng và tự tìm cách khác (mặt/điểm bấm khác, chỗ đứng khác,
+ * giàn giáo làm điểm tựa, hoặc dựng cột để leo lên).
+ */
 public final class Builder {
 
     public final Scanner scanner = new Scanner();
@@ -29,24 +37,48 @@ public final class Builder {
     public final AuctionBuyer buyer = new AuctionBuyer();
     public final Mover mover = new Mover();
 
-    public BlockPos focus;                 // block đang được xử lý (để vẽ khung xanh)
+    public BlockPos focus;
 
-    private boolean enabled;
-    private boolean approved;              // người chơi đã đồng ý báo giá -> được tự mua
-    private double budgetCap;
-    private double spentAtStart;
-    private boolean quoteWhenScanned;
-    private boolean cleaningUp;
-    private int tick;
-    private int rescanIn;
+    private enum Kind { PLACE, CLICK, BUCKET }
+    private enum Phase { PLAN, MOVE, AIM, VERIFY, PILLAR }
+
+    private static final class Task {
+        Kind kind;
+        BlockPos pos;
+        BlockState want;
+        Item item;
+        boolean scaffold;
+        int depth;
+        Direction needFace;
+        Phase phase = Phase.PLAN;
+        Planner.Found found;
+        Planner.Plan last;
+        final Set<String> banned = new HashSet<>();
+        int fails, replans;
+        int deadline;
+        BlockState before;
+        // cột leo
+        BlockPos pBase;
+        int pH, pK, pStage, pStart;
+    }
+
+    private boolean enabled, approved, quoteWhenScanned, cleaningUp;
+    private double budgetCap, spentAtStart;
+    private int tick, rescanIn, nextActionTick;
 
     private List<BlockPos> targets = new ArrayList<>();
-    private final Map<BlockPos, Integer> attempts = new HashMap<>();
-    private final Map<BlockPos, Integer> cooldownUntil = new HashMap<>();
+    private final Map<BlockPos, Integer> targetFails = new HashMap<>();
     private final Set<BlockPos> blacklist = new HashSet<>();
+    private final Set<BlockPos> badSpots = new HashSet<>();
     private final LinkedHashSet<BlockPos> scaffolds = new LinkedHashSet<>();
+    private final Deque<Task> stack = new ArrayDeque<>();
     private final Map<Item, Integer> buyTries = new HashMap<>();
     private final Set<Item> unobtainable = new HashSet<>();
+
+    // dọn giàn giáo
+    private BlockPos cleanTarget;
+    private Planner.Found cleanFound;
+    private int cleanDeadline;
 
     public boolean isEnabled() { return enabled; }
     public boolean isApproved() { return approved; }
@@ -70,7 +102,6 @@ public final class Builder {
         return out;
     }
 
-    /** Yêu cầu báo giá: quét xong (nếu cần) rồi tra /ah cho các món còn thiếu. */
     public void requestQuote(MinecraftClient mc) {
         if (enabled) return;
         quoter.reset();
@@ -79,7 +110,6 @@ public final class Builder {
         else { quoteWhenScanned = true; requestScan(mc); }
     }
 
-    /** @return null nếu bắt đầu được, ngược lại là lý do. */
     public String tryStart(MinecraftClient mc, boolean viaQuote) {
         if (enabled) return null;
         if (SchematicWorldHandler.getSchematicWorld() == null) return "Chưa nạp schematic trong Litematica.";
@@ -99,12 +129,14 @@ public final class Builder {
         enabled = on;
         if (on) {
             targets = new ArrayList<>(scanner.found);
-            attempts.clear(); cooldownUntil.clear(); blacklist.clear();
-            buyTries.clear(); unobtainable.clear(); rescanIn = 100; cleaningUp = false;
+            targetFails.clear(); blacklist.clear(); badSpots.clear(); stack.clear();
+            buyTries.clear(); unobtainable.clear(); rescanIn = 100; cleaningUp = false; cleanTarget = null;
             Util.chat(mc, "§aBẮT ĐẦU XÂY§r – " + targets.size() + " vị trí.");
         } else {
             buyer.cancel(mc);
-            mover.release(mc);
+            mover.stop(mc);
+            mc.options.jumpKey.setPressed(false);
+            stack.clear();
             focus = null;
             Util.chat(mc, "§cĐÃ DỪNG§r.");
         }
@@ -133,158 +165,380 @@ public final class Builder {
         buyer.tick(mc);
         quoter.tick(mc, buyer);
 
-        if (!enabled) { mover.release(mc); return; }
-        if (buyer.busy()) { mover.release(mc); return; }
+        if (!enabled) return;
+        if (buyer.busy()) { mover.stop(mc); return; }
         if (mc.currentScreen != null) return;
+        if (sw == null) { Util.status(mc, "Chưa nạp schematic Litematica."); return; }
 
         tick++;
         mover.tick(mc);
-        if (cleaningUp) { cleanupScaffolds(mc); return; }
-        if (tick % Config.delayTicks != 0) return;
-
-        if (sw == null) { Util.status(mc, "Chưa nạp schematic Litematica."); return; }
-
         if (--rescanIn <= 0 && scanner.st != Scanner.St.RUNNING) { scanner.start(mc); rescanIn = 100; }
 
-        step(mc, sw);
-    }
+        if (cleaningUp) { cleanupStep(mc); return; }
 
-    // ------------------------------------------------------------------ bước xây
-
-    private void step(MinecraftClient mc, WorldSchematic sw) {
-        ClientWorld w = mc.world;
-        ClientPlayerEntity p = mc.player;
-        Vec3d eye = p.getEyePos();
-
-        Integer layer = null;
-        BlockPos chosen = null;
-        StateDiff.Act chosenAct = null;
-        BlockPos nearestOut = null;
-
-        for (BlockPos pos : targets) {
-            if (blacklist.contains(pos)) continue;
-            if (layer != null && pos.getY() != layer) break;
-
-            BlockState schem = sw.getBlockState(pos);
-            StateDiff.Act act = StateDiff.diff(w.getBlockState(pos), schem);
-            if (act == StateDiff.Act.DONE || act == StateDiff.Act.SKIP) { attempts.remove(pos); continue; }
-            if (act == StateDiff.Act.BLOCKED) { blacklist.add(pos); continue; }
-
-            if (layer == null) layer = pos.getY();
-            if (cooldownUntil.getOrDefault(pos, 0) > tick) continue;
-            if (eye.distanceTo(Vec3d.ofCenter(pos)) > Config.reach + 0.3) {
-                if (nearestOut == null) nearestOut = pos;
-                continue;
-            }
-            chosen = pos; chosenAct = act;
-            break;
-        }
-
-        if (chosen == null) {
-            focus = null;
-            if (layer == null) { // hết việc
-                mover.release(mc);
+        if (stack.isEmpty()) {
+            if (tick < nextActionTick) return;       // delay giữa các block do người dùng chỉnh
+            Task t = pickTask(mc, sw);
+            if (t == null) {
+                focus = null;
                 if (!scaffolds.isEmpty()) { cleaningUp = true; return; }
                 Util.chat(mc, "§aHoàn thành§r (trong vùng quét). Bỏ qua " + blacklist.size() + " vị trí không xử lý được.");
                 setEnabled(mc, false);
                 return;
             }
-            if (nearestOut != null) {
-                focus = nearestOut;
-                if (Config.autoMove) { mover.moveTo(nearestOut); Util.status(mc, "Đang đi tới " + nearestOut.toShortString()); }
-                else Util.status(mc, "Tầng Y=" + layer + ": hãy lại gần " + nearestOut.toShortString());
-            }
-            return;
+            stack.push(t);
         }
-
-        mover.release(mc);
-        focus = chosen;
-        BlockState schem = sw.getBlockState(chosen);
-        int n = attempts.merge(chosen, 1, Integer::sum);
-        int limit = chosenAct == StateDiff.Act.ADJUST ? 10 : Config.maxAttempts;
-        if (n > limit) {
-            blacklist.add(chosen);
-            Util.chat(mc, "§eBỏ qua " + chosen.toShortString() + " (" + schem.getBlock().getName().getString() + ") sau nhiều lần thử.");
-            return;
-        }
-        cooldownUntil.put(chosen, tick + (chosenAct == StateDiff.Act.ADJUST ? Config.adjustDelayTicks : Config.ackTicks));
-
-        switch (chosenAct) {
-            case PLACE, PLACE_SLAB -> doPlace(mc, sw, chosen, schem, chosenAct == StateDiff.Act.PLACE_SLAB);
-            case ADJUST -> doAdjust(mc, chosen);
-            case WATERLOG -> doWaterlog(mc, chosen);
-            default -> {}
-        }
+        runTask(mc, sw, stack.peek());
     }
 
-    // ------------------------------------------------------------------ đặt block
+    // ------------------------------------------------------------------ chọn việc
 
-    private void doPlace(MinecraftClient mc, WorldSchematic sw, BlockPos pos, BlockState schem, boolean secondSlab) {
+    private Task pickTask(MinecraftClient mc, WorldSchematic sw) {
         ClientWorld w = mc.world;
-        ItemStack pick = schem.getPickStack(sw, pos, false);
-        Item item = pick.isEmpty() ? schem.getBlock().asItem() : pick.getItem();
-        if (item == Items.AIR) { blacklist.add(pos); return; }
+        Vec3d pp = mc.player.getPos();
+        Integer layer = null;
+        BlockPos best = null;
+        StateDiff.Act bestAct = null;
+        double bestD = Double.MAX_VALUE;
 
-        if (!ensureItem(mc, item, pos)) return;
-
-        if (secondSlab) {
-            BlockState ws = w.getBlockState(pos);
-            boolean bottom = ws.get(Properties.SLAB_TYPE) == net.minecraft.block.enums.SlabType.BOTTOM;
-            Direction face = bottom ? Direction.UP : Direction.DOWN;
-            Vec3d hit = Vec3d.ofCenter(pos).add(0, bottom ? 0.5 : -0.5, 0);
-            Util.lookAt(mc, hit);
-            Util.useBlock(mc, new BlockHitResult(hit, face, pos, false), false);
-            return;
+        for (BlockPos pos : targets) {
+            if (blacklist.contains(pos)) continue;
+            if (layer != null && pos.getY() != layer) break;
+            BlockState schem = sw.getBlockState(pos);
+            StateDiff.Act act = StateDiff.diff(w.getBlockState(pos), schem);
+            if (act == StateDiff.Act.DONE || act == StateDiff.Act.SKIP) continue;
+            if (act == StateDiff.Act.BLOCKED) { blacklist.add(pos); continue; }
+            if (layer == null) layer = pos.getY();
+            double d = Vec3d.ofCenter(pos).squaredDistanceTo(pp);
+            if (d < bestD) { bestD = d; best = pos; bestAct = act; }
         }
+        if (best == null) return null;
 
-        PlacementSolver.Plan plan = PlacementSolver.solve(mc, pos, schem, item);
-        if (plan == null) { placeScaffoldFor(mc, pos); return; }
-        Util.look(mc, plan.yaw(), plan.pitch());
-        Util.useBlock(mc, new BlockHitResult(plan.hit(), plan.face(), plan.support(), false), true);
+        BlockState schem = sw.getBlockState(best);
+        Task t = new Task();
+        t.pos = best;
+        t.want = schem;
+        switch (bestAct) {
+            case PLACE -> {
+                ItemStack pick = schem.getPickStack(sw, best, false);
+                Item item = pick.isEmpty() ? schem.getBlock().asItem() : pick.getItem();
+                if (item == Items.AIR) { blacklist.add(best); return pickTask(mc, sw); }
+                t.kind = Kind.PLACE; t.item = item;
+            }
+            case PLACE_SLAB -> {
+                ItemStack pick = schem.getPickStack(sw, best, false);
+                t.kind = Kind.CLICK; t.item = pick.getItem();
+                boolean bottom = w.getBlockState(best).get(Properties.SLAB_TYPE) == SlabType.BOTTOM;
+                t.needFace = bottom ? Direction.UP : Direction.DOWN;
+            }
+            case ADJUST -> { t.kind = Kind.CLICK; t.item = null; }
+            case WATERLOG -> { t.kind = Kind.BUCKET; t.item = Items.WATER_BUCKET; }
+            default -> { return null; }
+        }
+        return t;
     }
 
-    private void placeScaffoldFor(MinecraftClient mc, BlockPos pos) {
-        BlockPos spot = findScaffoldSpot(mc, pos, 0);
-        if (spot == null) {
-            Util.chat(mc, "§eKhông tìm được chỗ đặt giàn giáo cho " + pos.toShortString());
+    // ------------------------------------------------------------------ chạy nhiệm vụ
+
+    private void runTask(MinecraftClient mc, WorldSchematic sw, Task t) {
+        ClientWorld w = mc.world;
+        ClientPlayerEntity p = mc.player;
+        BlockState ws = w.getBlockState(t.pos);
+        focus = t.pos;
+
+        if (t.phase != Phase.PILLAR) {
+            if (isDone(t, ws, sw)) { finish(mc, t, true); return; }
+            if (isBlocked(t, ws, sw)) { finish(mc, t, false); return; }
+        }
+
+        switch (t.phase) {
+            case PLAN -> plan(mc, sw, t);
+
+            case MOVE -> {
+                if (mover.failed()) {
+                    mover.stop(mc);
+                    if (++t.replans > 3) { fail(mc, t, "không đi tới được chỗ đứng"); return; }
+                    t.phase = Phase.PLAN;
+                } else if (mover.arrived()) {
+                    mover.stop(mc);
+                    t.phase = Phase.AIM;
+                }
+            }
+
+            case AIM -> aim(mc, sw, t);
+
+            case VERIFY -> {
+                if (tick >= t.deadline) {            // chưa thấy block xuất hiện -> cách này không được
+                    if (t.last != null) t.banned.add(t.last.key());
+                    if (++t.fails >= Config.maxAttempts) fail(mc, t, "đặt không được sau nhiều cách");
+                    else t.phase = Phase.PLAN;
+                }
+            }
+
+            case PILLAR -> pillar(mc, sw, t);
+        }
+    }
+
+    private boolean isDone(Task t, BlockState ws, WorldSchematic sw) {
+        BlockState schem = sw.getBlockState(t.pos);
+        return switch (t.kind) {
+            case PLACE -> t.scaffold ? ws.getBlock() == t.want.getBlock() : ws.getBlock() == schem.getBlock();
+            case CLICK -> t.before != null && !ws.equals(t.before);
+            case BUCKET -> StateDiff.diff(ws, schem) == StateDiff.Act.DONE;
+        };
+    }
+
+    private boolean isBlocked(Task t, BlockState ws, WorldSchematic sw) {
+        if (t.kind == Kind.PLACE) {
+            Block expected = t.scaffold ? t.want.getBlock() : sw.getBlockState(t.pos).getBlock();
+            return !ws.isReplaceable() && ws.getBlock() != expected;
+        }
+        return ws.getBlock() != sw.getBlockState(t.pos).getBlock();
+    }
+
+    private void finish(MinecraftClient mc, Task t, boolean ok) {
+        stack.remove(t);
+        mover.stop(mc);
+        if (ok) {
+            if (t.scaffold) scaffolds.add(t.pos);
+            else { targetFails.remove(t.pos); badSpots.clear(); }
+            nextActionTick = tick + (t.kind == Kind.CLICK ? Config.adjustDelayTicks : Config.delayTicks);
+        } else {
+            if (t.scaffold) badSpots.add(t.pos);
+            else blacklist.add(t.pos);
+        }
+    }
+
+    private void fail(MinecraftClient mc, Task t, String why) {
+        mover.stop(mc);
+        mc.options.jumpKey.setPressed(false);
+        if (t.scaffold) {
+            stack.remove(t);
+            badSpots.add(t.pos);
+            if (!stack.isEmpty()) stack.peek().phase = Phase.PLAN; // nhiệm vụ cha tìm cách khác
             return;
         }
+        int n = targetFails.merge(t.pos, 1, Integer::sum);
+        stack.clear();
+        if (n >= 2) {
+            blacklist.add(t.pos);
+            Util.chat(mc, "§eBỏ qua " + t.pos.toShortString() + " (" + t.want.getBlock().getName().getString() + "): " + why);
+        } else {
+            badSpots.clear();
+        }
+    }
+
+    // ------------------------------------------------------------------ PLAN
+
+    private Planner.Solver solverFor(MinecraftClient mc, Task t, Set<BlockPos> extra) {
+        return switch (t.kind) {
+            case PLACE -> (eye, feet) -> Planner.solvePlace(mc, eye, feet, t.pos, t.want, t.item, extra, t.banned);
+            case CLICK -> (eye, feet) -> Planner.solveClick(mc, eye, feet, t.pos, t.needFace, t.banned);
+            case BUCKET -> (eye, feet) -> Planner.solveClick(mc, eye, feet, t.pos, null, t.banned);
+        };
+    }
+
+    private void plan(MinecraftClient mc, WorldSchematic sw, Task t) {
+        if (t.item != null && !haveOrBuy(mc, t.item, t)) return;
+
+        Planner.Found f = Planner.find(mc, sw, Vec3d.ofCenter(t.pos), solverFor(mc, t, Set.of()));
+        if (f != null) {
+            t.found = f;
+            if (f.path().isEmpty()) t.phase = Phase.AIM;
+            else { mover.follow(f.path()); t.phase = Phase.MOVE; }
+            return;
+        }
+        // không có cách trực tiếp -> thử giàn giáo làm điểm tựa, rồi dựng cột để leo
+        if (t.kind == Kind.PLACE && trySupportScaffold(mc, sw, t)) return;
+        if (tryPillar(mc, sw, t)) return;
+        fail(mc, t, "không tìm được cách đặt hợp lệ (không xuyên tường, trong 4 block)");
+    }
+
+    private boolean trySupportScaffold(MinecraftClient mc, WorldSchematic sw, Task t) {
+        if (t.depth >= 3) return false;
         Item si = pickScaffoldItem(mc);
-        if (si == null) return;
-        if (!ensureItem(mc, si, pos)) return;
+        if (si == null) return false;
 
-        Block sb = ((BlockItem) si).getBlock();
-        PlacementSolver.Plan plan = PlacementSolver.solve(mc, spot, sb.getDefaultState(), si);
-        if (plan == null) return;
-        Util.look(mc, plan.yaw(), plan.pitch());
-        Util.useBlock(mc, new BlockHitResult(plan.hit(), plan.face(), plan.support(), false), true);
-        scaffolds.add(spot);
+        BlockPos bestS = null;
+        double bestC = Double.MAX_VALUE;
+        for (Direction d : Direction.values()) {
+            BlockPos s = t.pos.offset(d);
+            if (badSpots.contains(s) || scaffoldOnStack(s)) continue;
+            if (!mc.world.getBlockState(s).isReplaceable()) continue;
+            if (!sw.getBlockState(s).isAir()) continue;               // không chiếm chỗ của block thật sau này
+            Planner.Found f = Planner.find(mc, sw, Vec3d.ofCenter(t.pos), solverFor(mc, t, Set.of(s)));
+            if (f == null) continue;
+            double c = f.cost() + (d == Direction.DOWN ? 0 : 1);
+            if (c < bestC) { bestC = c; bestS = s; }
+        }
+        if (bestS == null) return false;
+
+        Task st = new Task();
+        st.kind = Kind.PLACE;
+        st.pos = bestS;
+        st.want = ((BlockItem) si).getBlock().getDefaultState();
+        st.item = si;
+        st.scaffold = true;
+        st.depth = t.depth + 1;
+        stack.push(st);
+        return true;
     }
 
-    private BlockPos findScaffoldSpot(MinecraftClient mc, BlockPos pos, int depth) {
-        if (depth > 5) return null;
-        WorldSchematic sw = SchematicWorldHandler.getSchematicWorld();
-        Direction[] order = {Direction.DOWN, Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST, Direction.UP};
-        Vec3d eye = mc.player.getEyePos();
-
-        for (Direction d : order) {
-            BlockPos c = pos.offset(d);
-            if (!canScaffold(mc, sw, c, eye)) continue;
-            if (PlacementSolver.hasSupport(mc, c)) return c;
-        }
-        for (Direction d : order) {
-            BlockPos c = pos.offset(d);
-            if (!canScaffold(mc, sw, c, eye)) continue;
-            BlockPos deeper = findScaffoldSpot(mc, c, depth + 1);
-            if (deeper != null) return deeper;
-        }
-        return null;
+    private boolean scaffoldOnStack(BlockPos p) {
+        for (Task x : stack) if (x.pos.equals(p)) return true;
+        return false;
     }
 
-    private boolean canScaffold(MinecraftClient mc, WorldSchematic sw, BlockPos c, Vec3d eye) {
-        if (!mc.world.getBlockState(c).isReplaceable()) return false;
-        if (sw != null && !sw.getBlockState(c).isAir()) return false;
-        return eye.distanceTo(Vec3d.ofCenter(c)) <= Config.reach;
+    private boolean tryPillar(MinecraftClient mc, WorldSchematic sw, Task t) {
+        Item si = pickScaffoldItem(mc);
+        if (si == null) return false;
+        Nav nav = new Nav(mc, sw);
+        Vec3d center = Vec3d.ofCenter(t.pos);
+
+        Nav.Node bestN = null;
+        int bestH = 0;
+        double bestC = Double.MAX_VALUE;
+        int checked = 0;
+        for (Nav.Node n : nav.reachable(mc.player.getBlockPos(), 8, 600)) {
+            double hx = n.pos.getX() + 0.5 - center.x, hz = n.pos.getZ() + 0.5 - center.z;
+            if (Math.sqrt(hx * hx + hz * hz) > Config.reach) continue;
+            if (++checked > 60) break;
+            for (int h = 1; h <= 8; h++) {
+                if (!columnFree(mc, sw, n.pos, h)) break;
+                BlockPos stand = n.pos.up(h);
+                Vec3d eye = Planner.eyeAt(stand);
+                if (eye.distanceTo(center) > Config.reach + 1.0) continue;
+                if (solverFor(mc, t, Set.of()).solve(eye, Planner.feetAt(stand)) != null) {
+                    double c = n.cost + h * 3.0;
+                    if (c < bestC) { bestC = c; bestN = n; bestH = h; }
+                    break;
+                }
+            }
+        }
+        if (bestN == null) return false;
+
+        t.pBase = bestN.pos;
+        t.pH = bestH;
+        t.pK = 0;
+        t.pStage = 0;
+        t.phase = Phase.PILLAR;
+        mover.follow(bestN.path());
+        Util.chat(mc, "Dựng cột " + bestH + " block để leo tới " + t.pos.toShortString());
+        return true;
+    }
+
+    private boolean columnFree(MinecraftClient mc, WorldSchematic sw, BlockPos base, int h) {
+        for (int k = 0; k <= h + 1; k++) {
+            BlockPos c = base.up(k);
+            if (!mc.world.getBlockState(c).isReplaceable() && k > 0) return false;
+            if (!sw.getBlockState(c).isAir()) return false;
+        }
+        return true;
+    }
+
+    // ------------------------------------------------------------------ AIM + bấm
+
+    private void aim(MinecraftClient mc, WorldSchematic sw, Task t) {
+        ClientPlayerEntity p = mc.player;
+
+        // tính lại kế hoạch từ vị trí mắt THỰC TẾ
+        Planner.Plan pl = solverFor(mc, t, Set.of()).solve(p.getEyePos(), p.getPos());
+        if (pl == null) {
+            if (++t.replans > 4) { if (t.last != null) t.banned.add(t.last.key()); t.replans = 0; t.fails++; }
+            if (t.fails >= Config.maxAttempts) fail(mc, t, "không còn cách nào nhìn thấy điểm bấm");
+            else t.phase = Phase.PLAN;
+            return;
+        }
+
+        if (t.item != null) {
+            Util.Sel s = Util.select(mc, t.item);
+            if (s == Util.Sel.WAIT) return;
+            if (s == Util.Sel.MISSING) { t.phase = Phase.PLAN; return; }
+        }
+
+        // quay đầu mượt về hướng điểm bấm
+        float dy = MathHelper.wrapDegrees(pl.yaw() - p.getYaw());
+        float dp = pl.pitch() - p.getPitch();
+        if (Config.rotateHead && (Math.abs(dy) > 45 || Math.abs(dp) > 45)) {
+            Util.look(mc, p.getYaw() + MathHelper.clamp(dy, -45f, 45f), p.getPitch() + MathHelper.clamp(dp, -45f, 45f));
+            return;
+        }
+        Util.look(mc, pl.yaw(), pl.pitch());
+
+        t.before = mc.world.getBlockState(t.pos);
+        t.last = pl;
+        t.deadline = tick + Config.ackTicks;
+        t.phase = Phase.VERIFY;
+        BlockHitResult hit = new BlockHitResult(pl.hit(), pl.face(), pl.clicked(), false);
+        if (t.kind == Kind.BUCKET) Util.useItem(mc);
+        else Util.useBlock(mc, hit, false);
+    }
+
+    // ------------------------------------------------------------------ dựng cột
+
+    private void pillar(MinecraftClient mc, WorldSchematic sw, Task t) {
+        ClientPlayerEntity p = mc.player;
+        ClientWorld w = mc.world;
+
+        if (t.pStage == 0) {
+            if (mover.failed()) { mover.stop(mc); fail(mc, t, "không đi tới được chỗ dựng cột"); return; }
+            if (mover.busy()) return;
+            mover.stop(mc);
+            t.pStage = 1;
+            t.pStart = tick;
+        }
+
+        if (tick - t.pStart > 400) { mover.holdJump(mc, false); fail(mc, t, "dựng cột quá lâu"); return; }
+        if (t.pK >= t.pH) { mover.holdJump(mc, false); t.phase = Phase.PLAN; t.pStage = 0; return; }
+
+        Item si = pickScaffoldItem(mc);
+        if (si == null || !haveOrBuy(mc, si, t)) { mover.holdJump(mc, false); return; }
+        if (Util.select(mc, si) != Util.Sel.READY) { mover.holdJump(mc, false); return; }
+
+        BlockPos cell = t.pBase.up(t.pK);
+        if (!w.getBlockState(cell).isReplaceable()) {      // ô này đã có block -> sang ô kế
+            scaffolds.add(cell);
+            t.pK++;
+            mover.holdJump(mc, false);
+            return;
+        }
+        // đứng đúng cột
+        if (Math.abs(p.getX() - (cell.getX() + 0.5)) > 0.35 || Math.abs(p.getZ() - (cell.getZ() + 0.5)) > 0.35) {
+            Util.status(mc, "Đứng giữa cột để dựng...");
+        }
+        Util.look(mc, p.getYaw(), 90f);
+        if (p.isOnGround()) {
+            mover.holdJump(mc, true);
+        } else if (p.getY() > cell.getY() + 1.0) {          // đang ở trên không, ô dưới chân đã trống
+            mover.holdJump(mc, false);
+            Vec3d hit = new Vec3d(cell.getX() + 0.5, cell.getY(), cell.getZ() + 0.5);
+            Util.useBlock(mc, new BlockHitResult(hit, Direction.UP, cell.down(), false), false);
+        }
+    }
+
+    // ------------------------------------------------------------------ kho đồ + mua
+
+    private boolean haveOrBuy(MinecraftClient mc, Item item, Task t) {
+        if (Util.count(mc.player, item) > 0) return true;
+        if (!Config.autoBuy || !approved || unobtainable.contains(item)) {
+            Util.status(mc, "Thiếu " + Util.englishName(item));
+            fail(mc, t, "thiếu " + Util.englishName(item));
+            return false;
+        }
+        if (spentSinceStart() >= budgetCap) {
+            Util.chat(mc, "§cĐã chạm ngân sách đã đồng ý (" + Util.money(budgetCap) + "). Dừng mua thêm.");
+            Config.autoBuy = false;
+            return false;
+        }
+        int tries = buyTries.merge(item, 1, Integer::sum);
+        if (tries > Config.buyMaxTries) {
+            unobtainable.add(item);
+            Util.chat(mc, "§cKhông mua được " + Util.englishName(item) + ", bỏ qua các vị trí cần nó.");
+            fail(mc, t, "không mua được " + Util.englishName(item));
+            return false;
+        }
+        buyer.start(mc, item);
+        return false;
     }
 
     private Item pickScaffoldItem(MinecraftClient mc) {
@@ -298,67 +552,58 @@ public final class Builder {
         return list.get(0);
     }
 
-    // ------------------------------------------------------------------ chỉnh / nước
-
-    private void doAdjust(MinecraftClient mc, BlockPos pos) {
-        Vec3d hit = new Vec3d(pos.getX() + 0.5, pos.getY() + 0.1, pos.getZ() + 0.5);
-        Util.lookAt(mc, Vec3d.ofCenter(pos));
-        Util.useBlock(mc, new BlockHitResult(hit, Direction.UP, pos, false), false);
-    }
-
-    private void doWaterlog(MinecraftClient mc, BlockPos pos) {
-        if (!ensureItem(mc, Items.WATER_BUCKET, pos)) return;
-        Util.lookAt(mc, Vec3d.ofCenter(pos));
-        Util.useItem(mc);
-    }
-
-    // ------------------------------------------------------------------ kho đồ + mua
-
-    private boolean ensureItem(MinecraftClient mc, Item item, BlockPos forPos) {
-        Util.Sel s = Util.select(mc, item);
-        if (s == Util.Sel.READY) return true;
-        if (s == Util.Sel.WAIT) return false;
-
-        // thiếu đồ
-        if (!Config.autoBuy || !approved || unobtainable.contains(item)) {
-            Util.status(mc, "Thiếu " + Util.englishName(item));
-            if (forPos != null) blacklist.add(forPos);
-            return false;
-        }
-        if (spentSinceStart() >= budgetCap) {
-            Util.chat(mc, "§cĐã chạm ngân sách đã đồng ý (" + Util.money(budgetCap) + "). Dừng mua thêm.");
-            Config.autoBuy = false;
-            return false;
-        }
-        int tries = buyTries.merge(item, 1, Integer::sum);
-        if (tries > Config.buyMaxTries) {
-            unobtainable.add(item);
-            Util.chat(mc, "§cKhông mua được " + Util.englishName(item) + ", bỏ qua các vị trí cần nó.");
-            if (forPos != null) blacklist.add(forPos);
-            return false;
-        }
-        buyer.start(mc, item);
-        if (forPos != null) attempts.merge(forPos, -1, Integer::sum);
-        return false;
-    }
-
     // ------------------------------------------------------------------ dọn giàn giáo
 
-    private void cleanupScaffolds(MinecraftClient mc) {
+    private void cleanupStep(MinecraftClient mc) {
         ClientWorld w = mc.world;
-        Vec3d eye = mc.player.getEyePos();
-        scaffolds.removeIf(sp -> w.getBlockState(sp).isAir());
-        if (scaffolds.isEmpty()) { cleaningUp = false; return; }
-
-        List<BlockPos> list = new ArrayList<>(scaffolds);
-        list.sort(Comparator.<BlockPos>comparingInt(BlockPos::getY).reversed());
-        for (BlockPos sp : list) {
-            if (eye.distanceTo(Vec3d.ofCenter(sp)) > Config.reach) continue;
-            Util.lookAt(mc, Vec3d.ofCenter(sp));
-            mc.interactionManager.updateBlockBreakingProgress(sp, Direction.UP);
-            mc.player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
+        ClientPlayerEntity p = mc.player;
+        scaffolds.removeIf(sp -> w.getBlockState(sp).isReplaceable());
+        if (scaffolds.isEmpty()) {
+            cleaningUp = false;
+            mover.stop(mc);
+            Util.chat(mc, "§aHoàn thành§r và đã dọn giàn giáo. Bỏ qua " + blacklist.size() + " vị trí không xử lý được.");
+            setEnabled(mc, false);
             return;
         }
-        if (Config.autoMove) mover.moveTo(list.get(0)); else Util.status(mc, "Lại gần giàn giáo " + list.get(0).toShortString() + " để dọn.");
+
+        // đang đứng trên giàn giáo -> đào xuống (rơi xuống ô thấp hơn)
+        BlockPos below = p.getBlockPos().down();
+        if (p.isOnGround() && scaffolds.contains(below)) {
+            mover.stop(mc);
+            Util.look(mc, p.getYaw(), 90f);
+            mc.interactionManager.updateBlockBreakingProgress(below, Direction.UP);
+            p.swingHand(Hand.MAIN_HAND);
+            focus = below;
+            return;
+        }
+
+        if (cleanTarget == null || !scaffolds.contains(cleanTarget)) {
+            BlockPos hi = null;
+            for (BlockPos s : scaffolds) if (hi == null || s.getY() > hi.getY()) hi = s;
+            WorldSchematic sw = SchematicWorldHandler.getSchematicWorld();
+            Planner.Found f = Planner.find(mc, sw, Vec3d.ofCenter(hi), (eye, feet) -> Planner.solveClick(mc, eye, feet, hitFinal(hi), null, Set.of()));
+            if (f == null) {
+                Util.chat(mc, "§eKhông dọn được giàn giáo ở " + hi.toShortString());
+                scaffolds.remove(hi);
+                return;
+            }
+            cleanTarget = hi;
+            cleanFound = f;
+            cleanDeadline = tick + 300;
+            if (!f.path().isEmpty()) mover.follow(f.path());
+            return;
+        }
+        focus = cleanTarget;
+        if (tick > cleanDeadline) { scaffolds.remove(cleanTarget); cleanTarget = null; mover.stop(mc); return; }
+        if (mover.busy()) return;
+        if (mover.failed()) { mover.stop(mc); scaffolds.remove(cleanTarget); cleanTarget = null; return; }
+
+        Planner.Plan pl = Planner.solveClick(mc, p.getEyePos(), p.getPos(), cleanTarget, null, Set.of());
+        if (pl == null) { cleanTarget = null; return; }       // chọn lại
+        Util.look(mc, pl.yaw(), pl.pitch());
+        mc.interactionManager.updateBlockBreakingProgress(cleanTarget, pl.face());
+        p.swingHand(Hand.MAIN_HAND);
     }
+
+    private static BlockPos hitFinal(BlockPos p) { return p; }
 }
