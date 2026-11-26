@@ -25,6 +25,7 @@ public final class Config {
     // ---- tốc độ
     public static int delayTicks = 3;         // delay giữa 2 lần đặt block (tick, 20 tick = 1 giây)
     public static int adjustDelayTicks = 4;   // delay giữa các lần chỉnh (repeater, comparator...)
+    public static int ahDelayTicks = 6;       // chậm lại mỗi bước khi xem/mua ở /ah (tick; càng lớn càng chậm)
     public static int ackTicks = 8;           // chờ server phản hồi sau mỗi lần đặt
     public static int maxAttempts = 4;
 

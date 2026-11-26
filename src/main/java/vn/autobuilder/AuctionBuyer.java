@@ -76,7 +76,7 @@ public final class AuctionBuyer {
     public void tick(MinecraftClient mc) {
         if (!busy() || mc.player == null) return;
         timer++;
-        if (timer > (quote ? 120 : 240)) { fail(mc, "hết thời gian chờ menu /ah | " + describe(mc)); return; }
+        if (timer > (quote ? 120 : 240) + Config.ahDelayTicks * 10) { fail(mc, "hết thời gian chờ menu /ah | " + describe(mc)); return; }
 
         if (!(mc.currentScreen instanceof GenericContainerScreen gcs)) return;
         GenericContainerScreenHandler h = gcs.getScreenHandler();
@@ -85,7 +85,7 @@ public final class AuctionBuyer {
         switch (phase) {
             case WAIT_RESULTS -> {
                 if (title.contains(norm(Config.confirmTitle))) { phase = Phase.WAIT_CONFIRM; timer = 0; return; }
-                if (timer < 5) return;
+                if (timer < 5 + Config.ahDelayTicks) return;
                 // nhận diện menu kết quả theo tiêu đề, hoặc theo nội dung (có món cần tìm) nếu tiêu đề lạ
                 if (!title.contains(norm(Config.resultTitle)) && !hasWanted(h)) return;
 
@@ -140,7 +140,7 @@ public final class AuctionBuyer {
                 timer = 0;
             }
             case WAIT_CONFIRM -> {
-                if (timer < 4) return;
+                if (timer < 4 + Config.ahDelayTicks) return;
                 if (!title.contains(norm(Config.confirmTitle)) && findConfirm(h, false) < 0) return;
                 int btn = findConfirm(h, true);
                 if (btn < 0) { fail(mc, "không thấy nút Đồng ý"); return; }
@@ -150,7 +150,7 @@ public final class AuctionBuyer {
                 timer = 0;
             }
             case WAIT_DONE -> {
-                if (timer >= 8) {
+                if (timer >= 8 + Config.ahDelayTicks) {
                     mc.player.closeHandledScreen();
                     lastOk = true;
                     phase = Phase.IDLE;

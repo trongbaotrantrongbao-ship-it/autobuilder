@@ -41,15 +41,20 @@ public final class Quoter {
         st = queue.isEmpty() ? St.DONE : St.RUNNING;
     }
 
-    public void reset() { st = St.IDLE; lines.clear(); queue.clear(); total = 0; current = null; }
+    private int gap;
+
+    public void reset() { gap = 0; st = St.IDLE; lines.clear(); queue.clear(); total = 0; current = null; }
 
     public void tick(MinecraftClient mc, AuctionBuyer buyer) {
         if (st != St.RUNNING || buyer.busy() || mc.currentScreen != null) return;
+        if (gap > 0) { gap--; return; }
 
         if (current != null) { // vừa xong 1 món -> tính dòng
             addLine(current, queue.get(idx).getValue(), buyer);
             idx++;
             current = null;
+            gap = Config.ahDelayTicks * 2;      // nghỉ giữa 2 món để không tra /ah quá dồn dập
+            return;
         }
         if (idx >= queue.size()) { st = St.DONE; return; }
         current = queue.get(idx).getKey();

@@ -296,7 +296,11 @@ public class MenuScreen extends Screen {
             String err = b.startWithInventory(mc);
             if (err != null) toast(err); else close();
         });
-        y += 28;
+        y += 26;
+        slider(c, x, y, w, "Tốc độ xem /ah (độ trễ mỗi bước)", 0, 40, Config.ahDelayTicks,
+                Config.ahDelayTicks + " tick  (" + String.format("%.2f", Config.ahDelayTicks * 0.05) + "s)",
+                v -> Config.ahDelayTicks = (int) Math.round(v));
+        y += 26;
 
         if (q.st == Quoter.St.IDLE) {
             line(c, x, y, "Mod sẽ đếm tất cả vật phẩm cần cho công trình,", MUTED); y += 11;
@@ -314,7 +318,7 @@ public class MenuScreen extends Screen {
         int footer = 30;
         int listH = Math.max(rowH, h - (y - (h > 0 ? 0 : 0)) );
         int top = y;
-        int visible = Math.max(1, (h - 28 - 12 - footer) / rowH);
+        int visible = Math.max(1, (h - 52 - 12 - footer) / rowH);
         c.fill(x, top, x + w, top + 12, PANEL_HI);
         c.drawTextWithShadow(textRenderer, "Vật phẩm", x + 4, top + 2, MUTED);
         String c1 = "Cần", c2 = "Giá";
