@@ -31,6 +31,8 @@ public final class Config {
     // ---- hành vi
     public static int aimSpeed = 25;          // tốc độ xoay đầu (độ / tick)
     public static int aimSettleTicks = 2;     // đợi đầu đứng yên bao nhiêu tick rồi mới đặt
+    public static int approachMode = 0;       // góc đặt: 0 tự động, 1 cao, 2 thấp, 3 phải, 4 trái, 5 chéo, 6 ngẫu nhiên
+    public static int layerRetries = 3;       // số lần thử lại các block lỗi trong tầng trước khi bỏ qua
     public static boolean rotateHead = true;  // xoay đầu thật theo hướng đặt
     public static boolean autoMove = true;    // tự đi tới block cần đặt
     public static boolean autoBuy = true;     // tự mua đồ thiếu qua /ah (sau khi đã đồng ý báo giá)

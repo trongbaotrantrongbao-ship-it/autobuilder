@@ -58,6 +58,7 @@ public final class Builder {
         int deadline;
         int aimSettle;
         BlockState before;
+        Planner.Approach ap;
         // cột leo
         BlockPos pBase;
         int pH, pK, pStage, pStart;
@@ -66,6 +67,14 @@ public final class Builder {
     private boolean enabled, approved, quoteWhenScanned, cleaningUp;
     private double budgetCap, spentAtStart;
     private int tick, rescanIn, nextActionTick;
+
+    // thứ tự xây theo tầng
+    private final Set<BlockPos> deferred = new HashSet<>();   // block lỗi, thử lại sau khi xong phần còn lại của tầng
+    private int curLayer = Integer.MIN_VALUE, layerLeft, layerRound;
+    private int sweepMinZ, sweepMaxZ;
+    private boolean sweepZFlip, sweepXFlip;
+    private float refYaw;
+    private final Random rng = new Random();
 
     private List<BlockPos> targets = new ArrayList<>();
     private final Map<BlockPos, Integer> targetFails = new HashMap<>();
@@ -88,6 +97,9 @@ public final class Builder {
     public double spentSinceStart() { return buyer.spent - spentAtStart; }
     public int remaining() { return targets.size(); }
     public int skipped() { return blacklist.size(); }
+    public boolean hasLayer() { return enabled && curLayer != Integer.MIN_VALUE; }
+    public int layerY() { return curLayer; }
+    public int layerLeft() { return layerLeft; }
 
     // ------------------------------------------------------------------ điều khiển
 
@@ -126,6 +138,18 @@ public final class Builder {
         return null;
     }
 
+    /** Xây ngay bằng đồ có sẵn trong kho: không báo giá, không mua. Món nào thiếu thì bỏ qua vị trí cần nó. */
+    public String startWithInventory(MinecraftClient mc) {
+        if (enabled) return null;
+        if (SchematicWorldHandler.getSchematicWorld() == null) return "Chưa nạp schematic trong Litematica.";
+        if (scanner.st != Scanner.St.DONE) { requestScan(mc); return "Đang quét block ảo, hãy bấm lại sau vài giây."; }
+        approved = false;
+        budgetCap = 0;
+        spentAtStart = buyer.spent;
+        setEnabled(mc, true);
+        return null;
+    }
+
     public void setEnabled(MinecraftClient mc, boolean on) {
         if (on == enabled) return;
         enabled = on;
@@ -133,19 +157,23 @@ public final class Builder {
             targets = new ArrayList<>(scanner.found);
             targetFails.clear(); blacklist.clear(); badSpots.clear(); stack.clear();
             buyTries.clear(); unobtainable.clear(); skippedByItem.clear(); rescanIn = 100; cleaningUp = false; cleanTarget = null;
-            Util.chat(mc, "§aBẮT ĐẦU XÂY§r – " + targets.size() + " vị trí.");
+            deferred.clear(); curLayer = Integer.MIN_VALUE; layerLeft = 0; layerRound = 0;
+            refYaw = mc.player.getYaw();
+            Util.chat(mc, "§aBẮT ĐẦU XÂY§r – " + targets.size() + " vị trí, từng tầng từ dưới lên"
+                    + (approved ? "." : " (chỉ dùng đồ có sẵn trong kho)."));
         } else {
             buyer.cancel(mc);
             mover.stop(mc);
             mc.options.jumpKey.setPressed(false);
             stack.clear();
             focus = null;
+            curLayer = Integer.MIN_VALUE;
             Util.chat(mc, "§cĐÃ DỪNG§r.");
         }
     }
 
     public String statusText() {
-        return "enabled=" + enabled + ", còn " + targets.size() + " vị trí (bỏ qua " + blacklist.size()
+        return "enabled=" + enabled + (hasLayer() ? ", tầng Y=" + curLayer + " còn " + layerLeft : "") + ", còn " + targets.size() + " vị trí (bỏ qua " + blacklist.size()
                 + "), giàn giáo " + scaffolds.size();
     }
 
@@ -195,37 +223,68 @@ public final class Builder {
 
     // ------------------------------------------------------------------ chọn việc
 
+    private record Cand(BlockPos pos, StateDiff.Act act, int prio) {}
+
+    /**
+     * Xây NGHIÊM NGẶT từng tầng, từ dưới lên: chỉ chọn việc ở tầng thấp nhất còn việc. Block lỗi được hoãn
+     * và thử lại (tối đa Config.layerRetries lần) trước khi bị bỏ qua – nên không bao giờ nhảy lên tầng trên khi tầng dưới còn dở.
+     * Trong 1 tầng: làm các block có thể đứng lên/đặt trước (prio 0), rồi tới đồ mảnh/chỉnh/nước (prio 1);
+     * trong mỗi nhóm đi theo đường rắn (hàng này hết mới sang hàng kế) nên không bị lộn xộn.
+     */
     private Task pickTask(MinecraftClient mc, WorldSchematic sw) {
         ClientWorld w = mc.world;
-        Vec3d pp = Util.pos(mc.player);
-        Integer layer = null;
-        BlockPos best = null;
-        StateDiff.Act bestAct = null;
-        double bestD = Double.MAX_VALUE;
+        Cand chosen = null;
 
-        for (BlockPos pos : targets) {
-            if (blacklist.contains(pos)) continue;
-            if (layer != null && pos.getY() != layer) break;
-            BlockState schem = sw.getBlockState(pos);
-            StateDiff.Act act = StateDiff.diff(w.getBlockState(pos), schem);
-            if (act == StateDiff.Act.DONE || act == StateDiff.Act.SKIP) continue;
-            if (act == StateDiff.Act.BLOCKED) { blacklist.add(pos); continue; }
-            if (!unobtainable.isEmpty() && act == StateDiff.Act.PLACE) {   // món đã biết là không mua được -> bỏ qua êm
-                ItemStack pk = schem.getPickStack(sw, pos, false);
-                Item it = pk.isEmpty() ? schem.getBlock().asItem() : pk.getItem();
-                if (unobtainable.contains(it)) { skippedByItem.merge(it, 1, Integer::sum); blacklist.add(pos); continue; }
+        for (int attempt = 0; attempt < 2 && chosen == null; attempt++) {
+            Integer layer = null;
+            List<Cand> cands = new ArrayList<>();
+            boolean hadDeferred = false;
+
+            for (BlockPos pos : targets) {
+                if (blacklist.contains(pos)) continue;
+                if (layer != null && pos.getY() != layer) break;
+                BlockState schem = sw.getBlockState(pos);
+                StateDiff.Act act = StateDiff.diff(w.getBlockState(pos), schem);
+                if (act == StateDiff.Act.DONE || act == StateDiff.Act.SKIP) continue;
+                if (act == StateDiff.Act.BLOCKED) { blacklist.add(pos); continue; }
+                if (!unobtainable.isEmpty() && act == StateDiff.Act.PLACE) {   // món đã biết là không có -> bỏ qua êm
+                    ItemStack pk = schem.getPickStack(sw, pos, false);
+                    Item it = pk.isEmpty() ? schem.getBlock().asItem() : pk.getItem();
+                    if (unobtainable.contains(it)) { skippedByItem.merge(it, 1, Integer::sum); blacklist.add(pos); continue; }
+                }
+                if (layer == null) layer = pos.getY();
+                if (deferred.contains(pos)) { hadDeferred = true; layerLeft++; continue; }
+                int prio = (act == StateDiff.Act.PLACE || act == StateDiff.Act.PLACE_SLAB)
+                        && !schem.getCollisionShape(sw, pos).isEmpty() ? 0 : 1;
+                cands.add(new Cand(pos, act, prio));
             }
-            if (layer == null) layer = pos.getY();
-            double d = Vec3d.ofCenter(pos).squaredDistanceTo(pp);
-            if (d < bestD) { bestD = d; best = pos; bestAct = act; }
-        }
-        if (best == null) return null;
 
+            if (layer == null) { curLayer = Integer.MIN_VALUE; layerLeft = 0; return null; }   // xong hết
+            if (layer != curLayer) startLayer(mc, layer, cands);
+            layerLeft = cands.size() + (hadDeferred ? countDeferred(layer) : 0);
+
+            if (cands.isEmpty()) {
+                if (!hadDeferred) return null;
+                deferred.clear();             // vòng thử lại các block lỗi của tầng này
+                layerRound++;
+                continue;
+            }
+
+            Cand best = null;
+            for (Cand c : cands) if (best == null || order(c, best) < 0) best = c;
+            chosen = best;
+        }
+        if (chosen == null) return null;
+
+        Util.status(mc, "Tầng Y=" + curLayer + " – còn " + layerLeft + " block" + (layerRound > 0 ? " (thử lại lần " + layerRound + ")" : ""));
+
+        BlockPos best = chosen.pos();
         BlockState schem = sw.getBlockState(best);
         Task t = new Task();
         t.pos = best;
         t.want = schem;
-        switch (bestAct) {
+        t.ap = new Planner.Approach(Config.approachMode, refYaw, rng.nextDouble() * Math.PI * 2);
+        switch (chosen.act()) {
             case PLACE -> {
                 ItemStack pick = schem.getPickStack(sw, best, false);
                 Item item = pick.isEmpty() ? schem.getBlock().asItem() : pick.getItem();
@@ -244,6 +303,44 @@ public final class Builder {
         }
         return t;
     }
+
+    private int countDeferred(int layer) {
+        int n = 0;
+        for (BlockPos p : deferred) if (p.getY() == layer && !blacklist.contains(p)) n++;
+        return n;
+    }
+
+    /** Bắt đầu tầng mới: chọn góc quét gần người chơi nhất để đường đi liền mạch. */
+    private void startLayer(MinecraftClient mc, int layer, List<Cand> cands) {
+        curLayer = layer;
+        layerRound = 0;
+        deferred.clear();
+        int minX = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE, minZ = Integer.MAX_VALUE, maxZ = Integer.MIN_VALUE;
+        for (BlockPos p : targets) {
+            if (p.getY() != layer) continue;
+            minX = Math.min(minX, p.getX()); maxX = Math.max(maxX, p.getX());
+            minZ = Math.min(minZ, p.getZ()); maxZ = Math.max(maxZ, p.getZ());
+        }
+        if (minX == Integer.MAX_VALUE) { minX = maxX = minZ = maxZ = 0; }
+        Vec3d pp = Util.pos(mc.player);
+        sweepMinZ = minZ; sweepMaxZ = maxZ;
+        sweepZFlip = Math.abs(pp.z - maxZ) < Math.abs(pp.z - minZ);
+        sweepXFlip = Math.abs(pp.x - maxX) < Math.abs(pp.x - minX);
+    }
+
+    /** So sánh thứ tự xây: nhóm ưu tiên -> hàng (theo Z) -> theo X đảo chiều từng hàng (đường rắn). */
+    private int order(Cand a, Cand b) {
+        if (a.prio() != b.prio()) return Integer.compare(a.prio(), b.prio());
+        int ra = row(a.pos()), rb = row(b.pos());
+        if (ra != rb) return Integer.compare(ra, rb);
+        int ca = col(a.pos(), ra), cb = col(b.pos(), rb);
+        if (ca != cb) return Integer.compare(ca, cb);
+        return Long.compare(a.pos().asLong(), b.pos().asLong());
+    }
+
+    private int row(BlockPos p) { return sweepZFlip ? sweepMaxZ - p.getZ() : p.getZ() - sweepMinZ; }
+
+    private int col(BlockPos p, int row) { return ((row & 1) == 0) != sweepXFlip ? p.getX() : -p.getX(); }
 
     // ------------------------------------------------------------------ chạy nhiệm vụ
 
@@ -308,7 +405,7 @@ public final class Builder {
         mover.stop(mc);
         if (ok) {
             if (t.scaffold) scaffolds.add(t.pos);
-            else { targetFails.remove(t.pos); badSpots.clear(); }
+            else { targetFails.remove(t.pos); deferred.remove(t.pos); badSpots.clear(); }
             nextActionTick = tick + (t.kind == Kind.CLICK ? Config.adjustDelayTicks : Config.delayTicks);
         } else {
             if (t.scaffold) badSpots.add(t.pos);
@@ -327,10 +424,12 @@ public final class Builder {
         }
         int n = targetFails.merge(t.pos, 1, Integer::sum);
         stack.clear();
-        if (n >= 2) {
+        if (n >= Math.max(1, Config.layerRetries)) {
             blacklist.add(t.pos);
+            deferred.remove(t.pos);
             Util.chat(mc, "§eBỏ qua " + t.pos.toShortString() + " (" + t.want.getBlock().getName().getString() + "): " + why);
         } else {
+            deferred.add(t.pos);      // để sau, làm xong phần còn lại của tầng rồi thử lại
             badSpots.clear();
         }
     }
@@ -348,7 +447,7 @@ public final class Builder {
     private void plan(MinecraftClient mc, WorldSchematic sw, Task t) {
         if (t.item != null && !haveOrBuy(mc, t.item, t)) return;
 
-        Planner.Found f = Planner.find(mc, sw, Vec3d.ofCenter(t.pos), solverFor(mc, t, Set.of()));
+        Planner.Found f = Planner.find(mc, sw, Vec3d.ofCenter(t.pos), solverFor(mc, t, Set.of()), t.ap);
         if (f != null) {
             t.found = f;
             if (f.path().isEmpty()) t.phase = Phase.AIM;
@@ -525,7 +624,7 @@ public final class Builder {
         Util.look(mc, p.getYaw(), 90f);
         if (p.isOnGround()) {
             mover.holdJump(mc, true);
-        } else if (p.getY() > cell.getY() + 1.0) {          // đang ở trên không, ô dưới chân đã trống
+        } else if (p.getY() >= cell.getY() + 1.1) {         // đã lên đủ cao (chừa biên cho độ trễ server), ô dưới chân đã trống
             mover.holdJump(mc, false);
             Vec3d hit = new Vec3d(cell.getX() + 0.5, cell.getY(), cell.getZ() + 0.5);
             Util.useBlock(mc, new BlockHitResult(hit, Direction.UP, cell.down(), false), false);
@@ -559,8 +658,11 @@ public final class Builder {
     private void skipMissing(MinecraftClient mc, Task t, Item item) {
         int n = skippedByItem.merge(item, 1, Integer::sum);
         if (n == 1) {
-            Util.chat(mc, "§eKhông có §f" + Util.englishName(item) + "§e (hết hàng ở /ah hoặc không mua được) – bỏ qua mọi vị trí cần nó.");
+            Util.chat(mc, "§eKhông có §f" + Util.englishName(item) + "§e ("
+                    + (approved && Config.autoBuy ? "hết hàng ở /ah hoặc không mua được" : "không có trong kho, đang ở chế độ không mua")
+                    + ") – bỏ qua mọi vị trí cần nó.");
         }
+        if (!approved || !Config.autoBuy) unobtainable.add(item);
         mover.stop(mc);
         mc.options.jumpKey.setPressed(false);
         if (t.scaffold) {
@@ -593,7 +695,8 @@ public final class Builder {
         }
         if (list.isEmpty()) return null;
         for (Item it : list) if (Util.count(mc.player, it) > 0) return it;
-        return list.get(0);
+        for (Item it : list) if (!unobtainable.contains(it)) return it;   // chưa có trong kho: thử mua (nếu được phép)
+        return null;
     }
 
     // ------------------------------------------------------------------ dọn giàn giáo

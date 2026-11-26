@@ -60,11 +60,12 @@ public final class Util {
 
     public static void look(MinecraftClient mc, float yaw, float pitch) {
         ClientPlayerEntity p = mc.player;
-        if (Config.rotateHead) { // xoay đầu thật (nhìn thấy được); nếu tắt thì chỉ gửi hướng cho server
+        if (Config.rotateHead) { // xoay đầu thật: game tự gửi hướng nhìn mỗi tick -> KHÔNG gửi gói thừa (gói thừa làm server kéo lại / giật)
             p.setYaw(yaw);
             p.setPitch(pitch);
+        } else {                 // không xoay đầu thật: chỉ báo hướng cho server
+            p.networkHandler.sendPacket(new PlayerMoveC2SPacket.LookAndOnGround(yaw, pitch, p.isOnGround(), p.horizontalCollision));
         }
-        p.networkHandler.sendPacket(new PlayerMoveC2SPacket.LookAndOnGround(yaw, pitch, p.isOnGround(), p.horizontalCollision));
     }
 
     public static void lookAt(MinecraftClient mc, Vec3d target) {

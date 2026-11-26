@@ -132,14 +132,20 @@ public class MenuScreen extends Screen {
         MinecraftClient mc = MinecraftClient.getInstance();
 
         boolean on = b.isEnabled();
-        button(c, x, y, w, 22, on ? "DỪNG XÂY" : "BẮT ĐẦU XÂY", on ? RED : GREEN, true, () -> {
-            if (on) b.setEnabled(mc, false);
-            else {
+        if (on) {
+            button(c, x, y, w, 22, "DỪNG XÂY", RED, true, () -> b.setEnabled(mc, false));
+        } else {
+            int bw2 = (w - 8) / 2;
+            button(c, x, y, bw2, 22, "Xây (đã báo giá)", GREEN, true, () -> {
                 String err = b.tryStart(mc, false);
-                if (err != null) toast(err);
-            }
-        });
-        y += 30;
+                if (err != null) toast(err); else close();
+            });
+            button(c, x + bw2 + 8, y, bw2, 22, "Xây bằng đồ có sẵn", ACCENT, true, () -> {
+                String err = b.startWithInventory(mc);
+                if (err != null) toast(err); else close();
+            });
+        }
+        y += 28;
 
         slider(c, x, y, w, "Delay giữa các khối", 1, 20, Config.delayTicks,
                 Config.delayTicks + " tick  (" + String.format("%.2f", Config.delayTicks * 0.05) + "s)",
@@ -151,7 +157,11 @@ public class MenuScreen extends Screen {
         y += 24;
         slider(c, x, y, w, "Tốc độ xoay đầu", 5, 90, Config.aimSpeed, Config.aimSpeed + " độ/tick",
                 v -> Config.aimSpeed = (int) Math.round(v));
-        y += 28;
+        y += 26;
+        button(c, x, y, w, 16, "Góc đặt block: " + Planner.Approach.NAMES[Math.floorMod(Config.approachMode, Planner.Approach.NAMES.length)]
+                + "  (bấm để đổi)", PANEL_HI, true,
+                () -> Config.approachMode = (Config.approachMode + 1) % Planner.Approach.NAMES.length);
+        y += 22;
 
         int col = w >= 250 ? (w - 8) / 2 : w;
         int x2 = w >= 250 ? x + col + 8 : x;
@@ -165,6 +175,7 @@ public class MenuScreen extends Screen {
         if (w < 250) { toggle(c, x, y, col, "Hiện khung phạm vi", Config.showFrame, v -> Config.showFrame = v); y += 18; }
         y += 6;
 
+        if (b.hasLayer()) { line(c, x, y, "Đang xây tầng Y=" + b.layerY() + "  (còn " + b.layerLeft() + " block trong tầng)", GREEN); y += 12; }
         line(c, x, y, "Còn lại: " + b.remaining() + " vị trí   Bỏ qua: " + b.skipped(), TEXT); y += 12;
         line(c, x, y, "Đã chi: " + Util.money(b.spentSinceStart()) + (b.isApproved() ? " / ngân sách " + Util.money(b.budgetCap()) : ""), MUTED);
     }
@@ -270,9 +281,9 @@ public class MenuScreen extends Screen {
         MinecraftClient mc = MinecraftClient.getInstance();
         Quoter q = b.quoter;
 
-        int bw = (w - 8) / 2;
+        int bw = (w - 16) / 3;
         boolean running = q.st == Quoter.St.RUNNING || b.scanner.st == Scanner.St.RUNNING;
-        button(c, x, y, bw, 20, running ? "Đang kiểm tra..." : "Kiểm tra giá /ah", ACCENT, !running && !b.isEnabled(), () -> {
+        button(c, x, y, bw, 20, running ? "Đang kiểm tra..." : "Kiểm tra giá", ACCENT, !running && !b.isEnabled(), () -> {
             quoteScroll = 0;
             b.requestQuote(mc);
         });
@@ -281,12 +292,17 @@ public class MenuScreen extends Screen {
             String err = b.tryStart(mc, true);
             if (err != null) toast(err); else close();
         });
+        button(c, x + 2 * (bw + 8), y, bw, 20, "Bỏ qua mua", AMBER, !b.isEnabled() && !running, () -> {
+            String err = b.startWithInventory(mc);
+            if (err != null) toast(err); else close();
+        });
         y += 28;
 
         if (q.st == Quoter.St.IDLE) {
             line(c, x, y, "Mod sẽ đếm tất cả vật phẩm cần cho công trình,", MUTED); y += 11;
             line(c, x, y, "trừ đồ bạn đang có, rồi tra giá từng món ở /ah.", MUTED); y += 11;
-            line(c, x, y, "Sau khi bạn bấm Đồng ý, mod tự mua khi xây.", MUTED);
+            line(c, x, y, "Sau khi bạn bấm Đồng ý, mod tự mua khi xây.", MUTED); y += 11;
+            line(c, x, y, "\"Bỏ qua mua\": xây ngay bằng đồ có sẵn trong kho.", MUTED);
             return;
         }
         if (q.st == Quoter.St.RUNNING) {

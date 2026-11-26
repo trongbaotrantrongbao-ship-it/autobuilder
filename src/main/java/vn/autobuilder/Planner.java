@@ -48,22 +48,66 @@ public final class Planner {
     // ------------------------------------------------------------------ tìm chỗ đứng
 
     public static Found find(MinecraftClient mc, WorldSchematic sw, Vec3d focus, Solver s) {
+        return find(mc, sw, focus, s, null);
+    }
+
+    /** Góc tiếp cận do người dùng chọn: 0 tự động, 1 cao, 2 thấp, 3 phải, 4 trái, 5 chéo, 6 ngẫu nhiên (rand = góc 0..2π). */
+    public record Approach(int mode, float refYaw, double rand) {
+        public static final String[] NAMES = {"Tự động", "Cao", "Thấp", "Phải", "Trái", "Chéo", "Ngẫu nhiên"};
+
+        /** 0 = đúng ý muốn, lớn = lệch ý muốn (so sánh vị trí mắt với tâm block cần đặt). */
+        public double penalty(Vec3d eye, Vec3d t) {
+            double dx = eye.x - t.x, dy = eye.y - t.y, dz = eye.z - t.z;
+            double h = Math.sqrt(dx * dx + dz * dz);
+            double yaw = Math.toRadians(refYaw);
+            double rx = -Math.cos(yaw), rz = -Math.sin(yaw);     // hướng "phải" khi nhìn theo refYaw
+            double fx = -Math.sin(yaw), fz = Math.cos(yaw);      // hướng "trước"
+            double hh = Math.max(h, 0.3);
+            return switch (mode) {
+                case 1 -> -dy / 2.0;                                              // đứng càng cao càng tốt
+                case 2 -> dy / 2.0;                                               // đứng càng thấp càng tốt
+                case 3 -> -(dx * rx + dz * rz) / hh;                              // đứng bên phải
+                case 4 -> (dx * rx + dz * rz) / hh;                               // đứng bên trái
+                case 5 -> h < 0.3 ? 1.0 : Math.abs(Math.abs(dx * rx + dz * rz) - Math.abs(dx * fx + dz * fz)) / h; // chéo 45°
+                case 6 -> 1.0 - (dx * Math.cos(rand) + dz * Math.sin(rand)) / hh; // hướng ngẫu nhiên
+                default -> 0;
+            };
+        }
+    }
+
+    private static final double APPROACH_W = 4.0;
+
+    /** Tìm chỗ đứng. Nếu ap != null và mode != 0: chọn chỗ đứng hợp góc muốn (cân bằng với quãng đường đi). */
+    public static Found find(MinecraftClient mc, WorldSchematic sw, Vec3d focus, Solver s, Approach ap) {
         ClientPlayerEntity p = mc.player;
+        boolean pick = ap != null && ap.mode() != 0;
         Plan cur = s.solve(p.getEyePos(), Util.pos(p));
-        if (cur != null) return new Found(cur, List.of(), 0);
+        Found best = null;
+        double bestScore = Double.MAX_VALUE;
+        if (cur != null) {
+            if (!pick) return new Found(cur, List.of(), 0);
+            double pen = ap.penalty(p.getEyePos(), focus);
+            if (pen <= 0.15) return new Found(cur, List.of(), 0);
+            best = new Found(cur, List.of(), 0);
+            bestScore = pen * APPROACH_W;
+        }
 
         Nav nav = new Nav(mc, sw);
         List<Nav.Node> nodes = nav.reachable(p.getBlockPos(), 8, 600);
-        int checked = 0;
+        int checked = 0, feasible = 0;
         for (Nav.Node n : nodes) {
             if (n.pos.equals(p.getBlockPos())) continue;
             Vec3d eye = eyeAt(n.pos);
             if (eye.distanceTo(focus) > Config.reach + 1.2) continue;
-            if (++checked > 80) break;
+            if (++checked > 90) break;
             Plan pl = s.solve(eye, feetAt(n.pos));
-            if (pl != null) return new Found(pl, n.path(), n.cost);
+            if (pl == null) continue;
+            if (!pick) return new Found(pl, n.path(), n.cost);
+            double sc = n.cost + ap.penalty(eye, focus) * APPROACH_W;
+            if (sc < bestScore) { bestScore = sc; best = new Found(pl, n.path(), n.cost); }
+            if (++feasible >= 30) break;
         }
-        return null;
+        return best;
     }
 
     // ------------------------------------------------------------------ đặt block
