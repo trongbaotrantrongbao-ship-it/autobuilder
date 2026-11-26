@@ -58,6 +58,11 @@ public final class Quoter {
 
     private void addLine(Item item, int need, AuctionBuyer buyer) {
         List<AuctionBuyer.Listing> ls = new ArrayList<>(buyer.listings);
+        if (Config.preferFullStack) { // mod chỉ mua stack đầy nếu có
+            int full = new net.minecraft.item.ItemStack(item).getMaxCount();
+            List<AuctionBuyer.Listing> fulls = ls.stream().filter(l -> l.count() >= full).toList();
+            if (!fulls.isEmpty()) ls = new ArrayList<>(fulls);
+        }
         ls.sort(Comparator.comparingDouble(AuctionBuyer.Listing::unit));
         int got = 0;
         double cost = 0;

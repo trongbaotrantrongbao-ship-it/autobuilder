@@ -40,6 +40,8 @@ public final class Config {
     public static double maxPricePerListing = 5_000_000;
     public static double budgetFactor = 1.25; // cho phép chi vượt báo giá tối đa 25%
     public static int buyMaxTries = 3;
+    public static boolean preferFullStack = true; // ưu tiên stack đầy (64); không thấy thì bấm mũi tên trang sau
+    public static int maxPages = 8;               // tối đa số trang /ah được lật
     public static String ahCommand = "ah search %s";
     public static String resultTitle = "tìm kiếm";
     public static String confirmTitle = "xác nhận";

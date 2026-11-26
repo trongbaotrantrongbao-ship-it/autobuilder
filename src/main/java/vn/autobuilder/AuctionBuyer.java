@@ -38,6 +38,8 @@ public final class AuctionBuyer {
     private boolean lastOk;
     private boolean quote;
     private double pendingPrice;
+    private int expectPage;     // đang chờ chuyển sang trang này (0 = không chờ)
+    private int pagesVisited;
 
     public final List<Listing> listings = new ArrayList<>(); // kết quả báo giá gần nhất
     public double spent;                                      // tổng đã chi (ước tính theo giá niêm yết)
@@ -55,6 +57,8 @@ public final class AuctionBuyer {
         timer = 0;
         lastOk = false;
         listings.clear();
+        expectPage = 0;
+        pagesVisited = 1;
         phase = Phase.WAIT_RESULTS;
         String cmd = String.format(Config.ahCommand, Util.englishName(item));
         mc.player.networkHandler.sendChatCommand(cmd.startsWith("/") ? cmd.substring(1) : cmd);
@@ -81,29 +85,50 @@ public final class AuctionBuyer {
                 if (title.contains(Config.confirmTitle)) { phase = Phase.WAIT_CONFIRM; timer = 0; return; }
                 if (!title.contains(Config.resultTitle) || timer < 5) return;
 
-                int bestSlot = -1;
-                double bestUnit = Double.MAX_VALUE;
-                double bestPrice = 0;
-                for (int i = 0; i < h.getRows() * 9; i++) {
-                    ItemStack s = h.getSlot(i).getStack();
-                    if (s.isEmpty() || !s.isOf(want)) continue;
-                    double price = parsePrice(s);
+                int[] pg = page(title);                       // {trang hiện tại, tổng số trang}
+                if (expectPage > 0 && pg != null && pg[0] != expectPage) return; // chờ trang mới tải xong
+                expectPage = 0;
+
+                int fullSize = new ItemStack(want).getMaxCount();   // "stack đầy" (64, hoặc 16, 1...)
+                int listingEnd = h.getRows() > 1 ? (h.getRows() - 1) * 9 : h.getRows() * 9; // bỏ hàng nút điều khiển
+                int bestFull = -1, bestAny = -1;
+                double uFull = Double.MAX_VALUE, uAny = Double.MAX_VALUE, pFull = 0, pAny = 0;
+                boolean pageHasFull = false;
+
+                for (int i = 0; i < listingEnd; i++) {
+                    ItemStack st = h.getSlot(i).getStack();
+                    if (st.isEmpty() || !st.isOf(want)) continue;
+                    double price = parsePrice(st);
                     if (price < 0) continue;
-                    if (quote) { listings.add(new Listing(s.getCount(), price)); continue; }
+                    boolean full = !Config.preferFullStack || st.getCount() >= fullSize;
+                    if (quote) {
+                        listings.add(new Listing(st.getCount(), price));
+                        if (full) pageHasFull = true;
+                        continue;
+                    }
                     if (price > Config.maxPricePerListing) continue;
-                    double unit = price / Math.max(1, s.getCount());
-                    if (unit < bestUnit) { bestUnit = unit; bestSlot = i; bestPrice = price; }
+                    double unit = price / Math.max(1, st.getCount());
+                    if (unit < uAny) { uAny = unit; bestAny = i; pAny = price; }
+                    if (full && unit < uFull) { uFull = unit; bestFull = i; pFull = price; }
                 }
-                if (quote) { // chỉ đọc giá rồi đóng
+
+                boolean canNext = canNextPage(h, pg);
+                if (quote) {
+                    if (!pageHasFull && canNext) { clickNext(mc, h, pg); return; }
                     mc.player.closeHandledScreen();
                     lastOk = true;
                     phase = Phase.IDLE;
                     return;
                 }
-                if (bestSlot < 0) { fail(mc, "không có món phù hợp (hoặc quá giá)"); return; }
 
-                pendingPrice = bestPrice;
-                mc.interactionManager.clickSlot(h.syncId, bestSlot, 0, SlotActionType.PICKUP, mc.player);
+                int pick; double pickPrice;
+                if (bestFull >= 0) { pick = bestFull; pickPrice = pFull; }
+                else if (canNext) { clickNext(mc, h, pg); return; }   // chưa thấy stack đầy -> sang trang sau
+                else if (bestAny >= 0) { pick = bestAny; pickPrice = pAny; }
+                else { fail(mc, "không có món phù hợp (hoặc quá giá)"); return; }
+
+                pendingPrice = pickPrice;
+                mc.interactionManager.clickSlot(h.syncId, pick, 0, SlotActionType.PICKUP, mc.player);
                 phase = Phase.WAIT_CONFIRM;
                 timer = 0;
             }
@@ -139,6 +164,28 @@ public final class AuctionBuyer {
             }
             default -> {}
         }
+    }
+
+
+    /** Đọc "(1/8)" trong tiêu đề -> {1, 8}. null nếu không có. */
+    private static int[] page(String title) {
+        Matcher m = Pattern.compile("\\((\\d+)\\s*/\\s*(\\d+)\\)").matcher(title);
+        if (m.find()) return new int[]{Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2))};
+        return null;
+    }
+
+    /** Mũi tên "trang sau" nằm ở ô góc dưới bên phải của menu. */
+    private boolean canNextPage(GenericContainerScreenHandler h, int[] pg) {
+        if (pagesVisited >= Config.maxPages) return false;
+        if (pg != null && pg[0] >= pg[1]) return false;
+        return !h.getSlot(h.getRows() * 9 - 1).getStack().isEmpty();
+    }
+
+    private void clickNext(MinecraftClient mc, GenericContainerScreenHandler h, int[] pg) {
+        mc.interactionManager.clickSlot(h.syncId, h.getRows() * 9 - 1, 0, SlotActionType.PICKUP, mc.player);
+        expectPage = pg != null ? pg[0] + 1 : 0;
+        pagesVisited++;
+        timer = 0;
     }
 
     private void fail(MinecraftClient mc, String why) {
