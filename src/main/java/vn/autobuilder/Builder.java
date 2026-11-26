@@ -75,6 +75,7 @@ public final class Builder {
     private final Deque<Task> stack = new ArrayDeque<>();
     private final Map<Item, Integer> buyTries = new HashMap<>();
     private final Set<Item> unobtainable = new HashSet<>();
+    private final Map<Item, Integer> skippedByItem = new LinkedHashMap<>(); // vị trí bị bỏ qua vì thiếu món này
 
     // dọn giàn giáo
     private BlockPos cleanTarget;
@@ -131,7 +132,7 @@ public final class Builder {
         if (on) {
             targets = new ArrayList<>(scanner.found);
             targetFails.clear(); blacklist.clear(); badSpots.clear(); stack.clear();
-            buyTries.clear(); unobtainable.clear(); rescanIn = 100; cleaningUp = false; cleanTarget = null;
+            buyTries.clear(); unobtainable.clear(); skippedByItem.clear(); rescanIn = 100; cleaningUp = false; cleanTarget = null;
             Util.chat(mc, "§aBẮT ĐẦU XÂY§r – " + targets.size() + " vị trí.");
         } else {
             buyer.cancel(mc);
@@ -183,7 +184,7 @@ public final class Builder {
             if (t == null) {
                 focus = null;
                 if (!scaffolds.isEmpty()) { cleaningUp = true; return; }
-                Util.chat(mc, "§aHoàn thành§r (trong vùng quét). Bỏ qua " + blacklist.size() + " vị trí không xử lý được.");
+                Util.chat(mc, "§aHoàn thành§r (trong vùng quét). Bỏ qua " + blacklist.size() + " vị trí không xử lý được." + missingSummary());
                 setEnabled(mc, false);
                 return;
             }
@@ -209,6 +210,11 @@ public final class Builder {
             StateDiff.Act act = StateDiff.diff(w.getBlockState(pos), schem);
             if (act == StateDiff.Act.DONE || act == StateDiff.Act.SKIP) continue;
             if (act == StateDiff.Act.BLOCKED) { blacklist.add(pos); continue; }
+            if (!unobtainable.isEmpty() && act == StateDiff.Act.PLACE) {   // món đã biết là không mua được -> bỏ qua êm
+                ItemStack pk = schem.getPickStack(sw, pos, false);
+                Item it = pk.isEmpty() ? schem.getBlock().asItem() : pk.getItem();
+                if (unobtainable.contains(it)) { skippedByItem.merge(it, 1, Integer::sum); blacklist.add(pos); continue; }
+            }
             if (layer == null) layer = pos.getY();
             double d = Vec3d.ofCenter(pos).squaredDistanceTo(pp);
             if (d < bestD) { bestD = d; best = pos; bestAct = act; }
@@ -531,8 +537,7 @@ public final class Builder {
     private boolean haveOrBuy(MinecraftClient mc, Item item, Task t) {
         if (Util.count(mc.player, item) > 0) return true;
         if (!Config.autoBuy || !approved || unobtainable.contains(item)) {
-            Util.status(mc, "Thiếu " + Util.englishName(item));
-            fail(mc, t, "thiếu " + Util.englishName(item));
+            skipMissing(mc, t, item);
             return false;
         }
         if (spentSinceStart() >= budgetCap) {
@@ -543,12 +548,41 @@ public final class Builder {
         int tries = buyTries.merge(item, 1, Integer::sum);
         if (tries > Config.buyMaxTries) {
             unobtainable.add(item);
-            Util.chat(mc, "§cKhông mua được " + Util.englishName(item) + ", bỏ qua các vị trí cần nó.");
-            fail(mc, t, "không mua được " + Util.englishName(item));
+            skipMissing(mc, t, item);
             return false;
         }
         buyer.start(mc, item);
         return false;
+    }
+
+    /** Thiếu vật phẩm mà không mua được: bỏ qua vị trí này, báo 1 lần cho mỗi loại, các vị trí khác cần nó sẽ bị bỏ qua êm. */
+    private void skipMissing(MinecraftClient mc, Task t, Item item) {
+        int n = skippedByItem.merge(item, 1, Integer::sum);
+        if (n == 1) {
+            Util.chat(mc, "§eKhông có §f" + Util.englishName(item) + "§e (hết hàng ở /ah hoặc không mua được) – bỏ qua mọi vị trí cần nó.");
+        }
+        mover.stop(mc);
+        mc.options.jumpKey.setPressed(false);
+        if (t.scaffold) {
+            stack.remove(t);
+            badSpots.add(t.pos);
+            if (!stack.isEmpty()) stack.peek().phase = Phase.PLAN;
+        } else {
+            stack.clear();
+            blacklist.add(t.pos);
+        }
+    }
+
+    private String missingSummary() {
+        if (skippedByItem.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder("\n§eCòn thiếu (cần tự kiếm): ");
+        boolean first = true;
+        for (Map.Entry<Item, Integer> e : skippedByItem.entrySet()) {
+            if (!first) sb.append(", ");
+            sb.append(Util.englishName(e.getKey())).append(" ×").append(e.getValue());
+            first = false;
+        }
+        return sb.toString();
     }
 
     private Item pickScaffoldItem(MinecraftClient mc) {
@@ -571,7 +605,7 @@ public final class Builder {
         if (scaffolds.isEmpty()) {
             cleaningUp = false;
             mover.stop(mc);
-            Util.chat(mc, "§aHoàn thành§r và đã dọn giàn giáo. Bỏ qua " + blacklist.size() + " vị trí không xử lý được.");
+            Util.chat(mc, "§aHoàn thành§r và đã dọn giàn giáo. Bỏ qua " + blacklist.size() + " vị trí không xử lý được." + missingSummary());
             setEnabled(mc, false);
             return;
         }

@@ -83,7 +83,7 @@ public class MenuScreen extends Screen {
         c.fillGradient(px, py, px + pw, py + 24, 0xFF1B2433, 0xFF141A24);
         c.fill(px, py + 24, px + pw, py + 25, ACCENT);
         c.drawTextWithShadow(textRenderer, "AutoBuilder", px + 10, py + 8, TEXT);
-        c.drawTextWithShadow(textRenderer, "v1.1", px + 10 + textRenderer.getWidth("AutoBuilder ") + 2, py + 8, MUTED);
+        c.drawTextWithShadow(textRenderer, "v" + net.fabricmc.loader.api.FabricLoader.getInstance().getModContainer("autobuilder").map(m -> m.getMetadata().getVersion().getFriendlyString()).orElse(""), px + 10 + textRenderer.getWidth("AutoBuilder ") + 2, py + 8, MUTED);
 
         Builder b = AutoBuilderMod.BUILDER;
         String st; int stc;
