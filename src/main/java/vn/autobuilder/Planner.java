@@ -49,7 +49,7 @@ public final class Planner {
 
     public static Found find(MinecraftClient mc, WorldSchematic sw, Vec3d focus, Solver s) {
         ClientPlayerEntity p = mc.player;
-        Plan cur = s.solve(p.getEyePos(), p.getPos());
+        Plan cur = s.solve(p.getEyePos(), Util.pos(p));
         if (cur != null) return new Found(cur, List.of(), 0);
 
         Nav nav = new Nav(mc, sw);

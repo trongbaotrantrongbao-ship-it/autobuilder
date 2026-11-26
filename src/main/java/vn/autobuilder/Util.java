@@ -100,6 +100,8 @@ public final class Util {
         return Registries.ITEM.getId(item).getPath().replace('_', ' ');
     }
 
+    public static Vec3d pos(net.minecraft.entity.Entity e) { return new Vec3d(e.getX(), e.getY(), e.getZ()); }
+
     public static String money(double v) {
         if (v >= 1e9) return String.format(java.util.Locale.ROOT, "$%.2fB", v / 1e9);
         if (v >= 1e6) return String.format(java.util.Locale.ROOT, "$%.2fM", v / 1e6);

@@ -195,7 +195,7 @@ public final class Builder {
 
     private Task pickTask(MinecraftClient mc, WorldSchematic sw) {
         ClientWorld w = mc.world;
-        Vec3d pp = mc.player.getPos();
+        Vec3d pp = Util.pos(mc.player);
         Integer layer = null;
         BlockPos best = null;
         StateDiff.Act bestAct = null;
@@ -442,7 +442,7 @@ public final class Builder {
         ClientPlayerEntity p = mc.player;
 
         // tính lại kế hoạch từ vị trí mắt THỰC TẾ
-        Planner.Plan pl = solverFor(mc, t, Set.of()).solve(p.getEyePos(), p.getPos());
+        Planner.Plan pl = solverFor(mc, t, Set.of()).solve(p.getEyePos(), Util.pos(p));
         if (pl == null) {
             if (++t.replans > 4) { if (t.last != null) t.banned.add(t.last.key()); t.replans = 0; t.fails++; }
             if (t.fails >= Config.maxAttempts) fail(mc, t, "không còn cách nào nhìn thấy điểm bấm");
@@ -598,7 +598,7 @@ public final class Builder {
         if (mover.busy()) return;
         if (mover.failed()) { mover.stop(mc); scaffolds.remove(cleanTarget); cleanTarget = null; return; }
 
-        Planner.Plan pl = Planner.solveClick(mc, p.getEyePos(), p.getPos(), cleanTarget, null, Set.of());
+        Planner.Plan pl = Planner.solveClick(mc, p.getEyePos(), Util.pos(p), cleanTarget, null, Set.of());
         if (pl == null) { cleanTarget = null; return; }       // chọn lại
         Util.look(mc, pl.yaw(), pl.pitch());
         mc.interactionManager.updateBlockBreakingProgress(cleanTarget, pl.face());
