@@ -29,6 +29,8 @@ public final class Config {
     public static int maxAttempts = 4;
 
     // ---- hành vi
+    public static int aimSpeed = 25;          // tốc độ xoay đầu (độ / tick)
+    public static int aimSettleTicks = 2;     // đợi đầu đứng yên bao nhiêu tick rồi mới đặt
     public static boolean rotateHead = true;  // xoay đầu thật theo hướng đặt
     public static boolean autoMove = true;    // tự đi tới block cần đặt
     public static boolean autoBuy = true;     // tự mua đồ thiếu qua /ah (sau khi đã đồng ý báo giá)
@@ -81,6 +83,8 @@ public final class Config {
         scanRadius = Math.max(4, Math.min(96, scanRadius));
         scanUp = Math.max(0, Math.min(96, scanUp));
         scanDown = Math.max(0, Math.min(96, scanDown));
+        aimSpeed = Math.max(5, Math.min(90, aimSpeed));
+        aimSettleTicks = Math.max(0, Math.min(10, aimSettleTicks));
         delayTicks = Math.max(1, Math.min(40, delayTicks));
         adjustDelayTicks = Math.max(1, Math.min(40, adjustDelayTicks));
         swapHotbarSlot = Math.max(0, Math.min(8, swapHotbarSlot));

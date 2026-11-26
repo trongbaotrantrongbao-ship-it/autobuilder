@@ -148,6 +148,9 @@ public class MenuScreen extends Screen {
         slider(c, x, y, w, "Delay khi chỉnh (repeater...)", 1, 20, Config.adjustDelayTicks,
                 Config.adjustDelayTicks + " tick  (" + String.format("%.2f", Config.adjustDelayTicks * 0.05) + "s)",
                 v -> Config.adjustDelayTicks = (int) Math.round(v));
+        y += 24;
+        slider(c, x, y, w, "Tốc độ xoay đầu", 5, 90, Config.aimSpeed, Config.aimSpeed + " độ/tick",
+                v -> Config.aimSpeed = (int) Math.round(v));
         y += 28;
 
         int col = w >= 250 ? (w - 8) / 2 : w;

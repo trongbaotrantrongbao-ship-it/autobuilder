@@ -56,6 +56,7 @@ public final class Builder {
         final Set<String> banned = new HashSet<>();
         int fails, replans;
         int deadline;
+        int aimSettle;
         BlockState before;
         // cột leo
         BlockPos pBase;
@@ -456,14 +457,23 @@ public final class Builder {
             if (s == Util.Sel.MISSING) { t.phase = Phase.PLAN; return; }
         }
 
-        // quay đầu mượt về hướng điểm bấm
-        float dy = MathHelper.wrapDegrees(pl.yaw() - p.getYaw());
-        float dp = pl.pitch() - p.getPitch();
-        if (Config.rotateHead && (Math.abs(dy) > 45 || Math.abs(dp) > 45)) {
-            Util.look(mc, p.getYaw() + MathHelper.clamp(dy, -45f, 45f), p.getPitch() + MathHelper.clamp(dp, -45f, 45f));
-            return;
+        // quay đầu mượt về hướng điểm bấm, quay XONG và đứng yên rồi mới đặt
+        if (Config.rotateHead) {
+            float dy = MathHelper.wrapDegrees(pl.yaw() - p.getYaw());
+            float dp = pl.pitch() - p.getPitch();
+            float step = Config.aimSpeed;
+            if (Math.abs(dy) > 1.0f || Math.abs(dp) > 1.0f) {
+                Util.look(mc, p.getYaw() + MathHelper.clamp(dy, -step, step),
+                        p.getPitch() + MathHelper.clamp(dp, -step, step));
+                t.aimSettle = 0;
+                return;
+            }
+            Util.look(mc, pl.yaw(), pl.pitch());              // khớp chính xác hướng nhìn
+            if (t.aimSettle++ < Config.aimSettleTicks) return; // giữ yên vài tick cho server nhận hướng
+        } else {
+            Util.look(mc, pl.yaw(), pl.pitch());
         }
-        Util.look(mc, pl.yaw(), pl.pitch());
+        t.aimSettle = 0;
 
         t.before = mc.world.getBlockState(t.pos);
         t.last = pl;
