@@ -581,7 +581,8 @@ public final class Builder {
             BlockPos hi = null;
             for (BlockPos s : scaffolds) if (hi == null || s.getY() > hi.getY()) hi = s;
             WorldSchematic sw = SchematicWorldHandler.getSchematicWorld();
-            Planner.Found f = Planner.find(mc, sw, Vec3d.ofCenter(hi), (eye, feet) -> Planner.solveClick(mc, eye, feet, hitFinal(hi), null, Set.of()));
+            final BlockPos hiF = hi;
+            Planner.Found f = Planner.find(mc, sw, Vec3d.ofCenter(hiF), (eye, feet) -> Planner.solveClick(mc, eye, feet, hiF, null, Set.of()));
             if (f == null) {
                 Util.chat(mc, "§eKhông dọn được giàn giáo ở " + hi.toShortString());
                 scaffolds.remove(hi);
@@ -604,6 +605,4 @@ public final class Builder {
         mc.interactionManager.updateBlockBreakingProgress(cleanTarget, pl.face());
         p.swingHand(Hand.MAIN_HAND);
     }
-
-    private static BlockPos hitFinal(BlockPos p) { return p; }
 }
