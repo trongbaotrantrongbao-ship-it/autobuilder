@@ -29,7 +29,46 @@ public final class Util {
             ItemStack s = inv.getMainStacks().get(i);
             if (s.isOf(item)) c += s.getCount();
         }
+        ItemStack off = p.getOffHandStack();
+        if (off.isOf(item)) c += off.getCount();
         return c;
+    }
+
+    /** Chọn ngay item nếu nó nằm trong hotbar (không chờ). false nếu không ở hotbar. */
+    public static boolean selectNow(MinecraftClient mc, Item item) {
+        ClientPlayerEntity p = mc.player;
+        PlayerInventory inv = p.getInventory();
+        if (inv.getMainStacks().get(inv.getSelectedSlot()).isOf(item)) return true;
+        for (int i = 0; i < 9; i++) {
+            if (inv.getMainStacks().get(i).isOf(item)) {
+                inv.setSelectedSlot(i);
+                p.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(i));
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Cầm công cụ đào nhanh nhất trong hotbar cho block này. */
+    public static void bestTool(MinecraftClient mc, net.minecraft.block.BlockState st) {
+        ClientPlayerEntity p = mc.player;
+        PlayerInventory inv = p.getInventory();
+        int best = inv.getSelectedSlot();
+        float bs = inv.getMainStacks().get(best).getMiningSpeedMultiplier(st);
+        for (int i = 0; i < 9; i++) {
+            float v = inv.getMainStacks().get(i).getMiningSpeedMultiplier(st);
+            if (v > bs + 0.01f) { bs = v; best = i; }
+        }
+        if (best != inv.getSelectedSlot()) {
+            inv.setSelectedSlot(best);
+            p.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(best));
+        }
+    }
+
+    /** Chỉ báo hướng nhìn cho server (không xoay camera) – dùng khi đặt nhanh. */
+    public static void silentLook(MinecraftClient mc, float yaw, float pitch) {
+        ClientPlayerEntity p = mc.player;
+        p.networkHandler.sendPacket(new PlayerMoveC2SPacket.LookAndOnGround(yaw, pitch, p.isOnGround(), p.horizontalCollision));
     }
 
     /** Đưa item vào tay chính. READY = đang cầm; WAIT = vừa hoán đổi, chờ tick sau; MISSING = không có. */

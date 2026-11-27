@@ -29,7 +29,7 @@ public class MenuScreen extends Screen {
     private static final int RED       = 0xFFFF5C5C;
     private static final int AMBER     = 0xFFFFB84D;
 
-    private static final String[] TABS = {"Điều khiển", "Phạm vi", "Công trình 3D", "Báo giá"};
+    private static final String[] TABS = {"Điều khiển", "Tốc độ", "Phạm vi", "Công trình 3D", "Báo giá"};
 
     private static final class Hit {
         int x, y, w, h;
@@ -103,7 +103,7 @@ public class MenuScreen extends Screen {
             boolean sel = tab == i;
             Hit h = hit(px + 5, ty, sbw - 10, 20);
             final int idx = i;
-            h.click = () -> { tab = idx; if (idx == 2) lastVersion = -1; };
+            h.click = () -> { tab = idx; if (idx == 3) lastVersion = -1; };
             boolean hov = h.in(mx, my);
             c.fill(h.x, h.y, h.x + h.w, h.y + h.h, sel ? ACCENT : (hov ? PANEL_HI : PANEL));
             if (sel) c.fill(h.x, h.y, h.x + 2, h.y + h.h, 0xFFFFFFFF);
@@ -113,8 +113,9 @@ public class MenuScreen extends Screen {
         int cx = px + sbw + 10, cy = py + 33, cw = pw - sbw - 20, ch = ph - 40;
         switch (tab) {
             case 0 -> tabControl(c, cx, cy, cw, ch);
-            case 1 -> tabRange(c, cx, cy, cw, ch);
-            case 2 -> tabPreview(c, cx, cy, cw, ch);
+            case 1 -> tabSpeed(c, cx, cy, cw, ch);
+            case 2 -> tabRange(c, cx, cy, cw, ch);
+            case 3 -> tabPreview(c, cx, cy, cw, ch);
             default -> tabQuote(c, cx, cy, cw, ch);
         }
 
@@ -147,17 +148,6 @@ public class MenuScreen extends Screen {
         }
         y += 28;
 
-        slider(c, x, y, w, "Delay giữa các khối", 1, 20, Config.delayTicks,
-                Config.delayTicks + " tick  (" + String.format("%.2f", Config.delayTicks * 0.05) + "s)",
-                v -> Config.delayTicks = (int) Math.round(v));
-        y += 24;
-        slider(c, x, y, w, "Delay khi chỉnh (repeater...)", 1, 20, Config.adjustDelayTicks,
-                Config.adjustDelayTicks + " tick  (" + String.format("%.2f", Config.adjustDelayTicks * 0.05) + "s)",
-                v -> Config.adjustDelayTicks = (int) Math.round(v));
-        y += 24;
-        slider(c, x, y, w, "Tốc độ xoay đầu", 5, 90, Config.aimSpeed, Config.aimSpeed + " độ/tick",
-                v -> Config.aimSpeed = (int) Math.round(v));
-        y += 26;
         button(c, x, y, w, 16, "Góc đặt block: " + Planner.Approach.NAMES[Math.floorMod(Config.approachMode, Planner.Approach.NAMES.length)]
                 + "  (bấm để đổi)", PANEL_HI, true,
                 () -> Config.approachMode = (Config.approachMode + 1) % Planner.Approach.NAMES.length);
@@ -178,6 +168,50 @@ public class MenuScreen extends Screen {
         if (b.hasLayer()) { line(c, x, y, "Đang xây tầng Y=" + b.layerY() + "  (còn " + b.layerLeft() + " block trong tầng)", GREEN); y += 12; }
         line(c, x, y, "Còn lại: " + b.remaining() + " vị trí   Bỏ qua: " + b.skipped(), TEXT); y += 12;
         line(c, x, y, "Đã chi: " + Util.money(b.spentSinceStart()) + (b.isApproved() ? " / ngân sách " + Util.money(b.budgetCap()) : ""), MUTED);
+    }
+
+    // ----------------------------------------------------------------- tab Tốc độ
+    private void tabSpeed(DrawContext c, int x, int y, int w, int h) {
+        int bw = (w - 16) / 3;
+        button(c, x, y, bw, 18, "Như video", GREEN, true, () -> {
+            Config.fastMode = true; Config.placePerTick = 3; Config.fastDelayTicks = 0;
+            Config.adjustDelayTicks = 1; Config.aimSettleTicks = 0; toast("Đã chọn: như video (nhanh)");
+        });
+        button(c, x + bw + 8, y, bw, 18, "Vừa", ACCENT, true, () -> {
+            Config.fastMode = false; Config.delayTicks = 2; Config.adjustDelayTicks = 3;
+            Config.aimSpeed = 40; Config.aimSettleTicks = 1; toast("Đã chọn: vừa");
+        });
+        button(c, x + 2 * (bw + 8), y, bw, 18, "Chậm / an toàn", AMBER, true, () -> {
+            Config.fastMode = false; Config.delayTicks = 6; Config.adjustDelayTicks = 6;
+            Config.aimSpeed = 20; Config.aimSettleTicks = 3; toast("Đã chọn: chậm, an toàn");
+        });
+        y += 24;
+        toggle(c, x, y, w, "Đặt nhanh (nhiều block/tick, không chờ xoay)", Config.fastMode, v -> Config.fastMode = v);
+        y += 20;
+        if (Config.fastMode) {
+            slider(c, x, y, w, "Số block mỗi tick", 1, 8, Config.placePerTick, Config.placePerTick + " block/tick  (~" + (Config.placePerTick * 20) + "/s)",
+                    v -> Config.placePerTick = (int) Math.round(v));
+            y += 24;
+            slider(c, x, y, w, "Nghỉ giữa các đợt", 0, 10, Config.fastDelayTicks, Config.fastDelayTicks + " tick",
+                    v -> Config.fastDelayTicks = (int) Math.round(v));
+            y += 24;
+        } else {
+            slider(c, x, y, w, "Delay giữa các khối", 0, 20, Config.delayTicks,
+                    Config.delayTicks + " tick  (" + String.format("%.2f", Config.delayTicks * 0.05) + "s)",
+                    v -> Config.delayTicks = (int) Math.round(v));
+            y += 24;
+            slider(c, x, y, w, "Tốc độ xoay đầu", 5, 90, Config.aimSpeed, Config.aimSpeed + " độ/tick",
+                    v -> Config.aimSpeed = (int) Math.round(v));
+            y += 24;
+        }
+        slider(c, x, y, w, "Delay khi chỉnh (repeater...)", 0, 20, Config.adjustDelayTicks,
+                Config.adjustDelayTicks + " tick", v -> Config.adjustDelayTicks = (int) Math.round(v));
+        y += 24;
+        slider(c, x, y, w, "Tốc độ quét", 2, 45, Config.scanMsPerTick, Config.scanMsPerTick + " ms/tick",
+                v -> Config.scanMsPerTick = (int) Math.round(v));
+        y += 24;
+        slider(c, x, y, w, "Độ trễ xem /ah", 0, 40, Config.ahDelayTicks, Config.ahDelayTicks + " tick",
+                v -> Config.ahDelayTicks = (int) Math.round(v));
     }
 
     // ----------------------------------------------------------------- tab 1
@@ -458,8 +492,8 @@ public class MenuScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mx, double my, double h, double v) {
-        if (tab == 2) { pv.zoom = (float) Math.max(0.4, Math.min(4.0, pv.zoom * (v > 0 ? 1.1 : 0.9))); pv.dirty = true; return true; }
-        if (tab == 3) { quoteScroll -= (int) Math.signum(v) * 2; return true; }
+        if (tab == 3) { pv.zoom = (float) Math.max(0.4, Math.min(4.0, pv.zoom * (v > 0 ? 1.1 : 0.9))); pv.dirty = true; return true; }
+        if (tab == 4) { quoteScroll -= (int) Math.signum(v) * 2; return true; }
         return super.mouseScrolled(mx, my, h, v);
     }
 

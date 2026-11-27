@@ -19,6 +19,7 @@ import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.RaycastContext;
+import fi.dy.masa.litematica.world.SchematicWorldHandler;
 
 import java.util.List;
 import java.util.Set;
@@ -77,6 +78,9 @@ public final class Planner {
 
     private static final double APPROACH_W = 4.0;
 
+    /** Các ô giàn giáo hiện có (Builder cập nhật) – block cần bám không được dựa vào giàn giáo vì sẽ rơi khi phá giàn. */
+    public static Set<BlockPos> scaffoldCells = Set.of();
+
     /** Tìm chỗ đứng. Nếu ap != null và mode != 0: chọn chỗ đứng hợp góc muốn (cân bằng với quãng đường đi). */
     public static Found find(MinecraftClient mc, WorldSchematic sw, Vec3d focus, Solver s, Approach ap) {
         ClientPlayerEntity p = mc.player;
@@ -93,19 +97,24 @@ public final class Planner {
         }
 
         Nav nav = new Nav(mc, sw);
-        List<Nav.Node> nodes = nav.reachable(p.getBlockPos(), 8, 600);
-        int checked = 0, feasible = 0;
-        for (Nav.Node n : nodes) {
-            if (n.pos.equals(p.getBlockPos())) continue;
-            Vec3d eye = eyeAt(n.pos);
-            if (eye.distanceTo(focus) > Config.reach + 1.2) continue;
-            if (++checked > 90) break;
-            Plan pl = s.solve(eye, feetAt(n.pos));
-            if (pl == null) continue;
-            if (!pick) return new Found(pl, n.path(), n.cost);
-            double sc = n.cost + ap.penalty(eye, focus) * APPROACH_W;
-            if (sc < bestScore) { bestScore = sc; best = new Found(pl, n.path(), n.cost); }
-            if (++feasible >= 30) break;
+        // pha 1: quanh người chơi; pha 2 (khi mục tiêu ở xa): tìm đường đi bộ tới tận chỗ có block cần đặt
+        int[][] phases = {{8, 600, 90}, {48, 9000, 140}};
+        for (int[] ph : phases) {
+            if (best != null) break;
+            List<Nav.Node> nodes = nav.reachable(p.getBlockPos(), ph[0], ph[1]);
+            int checked = 0, feasible = 0;
+            for (Nav.Node n : nodes) {
+                if (n.pos.equals(p.getBlockPos())) continue;
+                Vec3d eye = eyeAt(n.pos);
+                if (eye.distanceTo(focus) > Config.reach + 1.2) continue;
+                if (++checked > ph[2]) break;
+                Plan pl = s.solve(eye, feetAt(n.pos));
+                if (pl == null) continue;
+                if (!pick) return new Found(pl, n.path(), n.cost);
+                double sc = n.cost + ap.penalty(eye, focus) * APPROACH_W;
+                if (sc < bestScore) { bestScore = sc; best = new Found(pl, n.path(), n.cost); }
+                if (++feasible >= 30) break;
+            }
         }
         return best;
     }
@@ -118,6 +127,7 @@ public final class Planner {
         ClientPlayerEntity p = mc.player;
         if (hitsPlayer(w, target, want, feet)) return null;
 
+        WorldSchematic sws = SchematicWorldHandler.getSchematicWorld();
         Block wantBlock = want.getBlock();
         Block simBlock = item instanceof BlockItem bi ? bi.getBlock() : wantBlock;
         ItemStack stack = new ItemStack(item);
@@ -165,9 +175,12 @@ public final class Planner {
                     double score = dh;
                     if (hyp) {
                         if (got != null && got.getBlock() != wantBlock) continue;
+                        // block cần bám (đuốc, nút...) không được dựa vào giàn giáo: phá giàn là rơi
+                        if (got != null && sws != null && !got.canPlaceAt(sws, target)) continue;
                     } else {
                         if (got == null || got.getBlock() != wantBlock) continue;
                         if (!got.canPlaceAt(w, target)) continue;
+                        if (sws != null && scaffoldCells.contains(x) && !got.canPlaceAt(sws, target)) continue;
                         List<Property<?>> diff = StateDiff.diffProps(got, want);
                         if (!diff.isEmpty()) {
                             if (!StateDiff.softOnly(diff)) continue;

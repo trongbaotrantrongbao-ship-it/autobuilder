@@ -32,6 +32,10 @@ public final class Config {
     // ---- hành vi
     public static int aimSpeed = 25;          // tốc độ xoay đầu (độ / tick)
     public static int aimSettleTicks = 2;     // đợi đầu đứng yên bao nhiêu tick rồi mới đặt
+    public static boolean fastMode = true;    // đặt nhanh kiểu "Easy Place": nhiều block / tick, không chờ xoay đầu
+    public static int placePerTick = 3;       // số block tối đa mỗi tick ở chế độ nhanh
+    public static int fastDelayTicks = 0;     // nghỉ giữa 2 đợt đặt ở chế độ nhanh
+    public static int scanMsPerTick = 15;     // thời gian quét tối đa mỗi tick (ms) – càng cao quét càng nhanh
     public static int approachMode = 0;       // góc đặt: 0 tự động, 1 cao, 2 thấp, 3 phải, 4 trái, 5 chéo, 6 ngẫu nhiên
     public static int layerRetries = 3;       // số lần thử lại các block lỗi trong tầng trước khi bỏ qua
     public static boolean rotateHead = true;  // xoay đầu thật theo hướng đặt

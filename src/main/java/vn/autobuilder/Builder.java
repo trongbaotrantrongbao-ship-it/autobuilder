@@ -64,7 +64,19 @@ public final class Builder {
         int pH, pK, pStage, pStart;
     }
 
-    private boolean enabled, approved, quoteWhenScanned, cleaningUp;
+    private boolean enabled, approved, quoteWhenScanned, cleaningUp, cleanFinal;
+    private int cleanedForLayer = Integer.MIN_VALUE;
+
+    // đặt nhanh: block vừa đặt, chờ server xác nhận
+    private final Map<BlockPos, Integer> recent = new HashMap<>();
+    // block bị bỏ qua vì thiếu đồ -> nhặt được đồ thì tự làm lại
+    private final Map<Item, Set<BlockPos>> skippedPos = new HashMap<>();
+
+    // thoát khi bị kẹt
+    private boolean escaping, escWalking;
+    private List<Nav.RStep> escape;
+    private int escIdx, escDeadline, escFails, escapeCount;
+
     private double budgetCap, spentAtStart;
     private int tick, rescanIn, nextActionTick;
 
@@ -90,6 +102,8 @@ public final class Builder {
     private BlockPos cleanTarget;
     private Planner.Found cleanFound;
     private int cleanDeadline;
+
+    public Builder() { Planner.scaffoldCells = scaffolds; }
 
     public boolean isEnabled() { return enabled; }
     public boolean isApproved() { return approved; }
@@ -158,6 +172,7 @@ public final class Builder {
             targetFails.clear(); blacklist.clear(); badSpots.clear(); stack.clear();
             buyTries.clear(); unobtainable.clear(); skippedByItem.clear(); rescanIn = 100; cleaningUp = false; cleanTarget = null;
             deferred.clear(); curLayer = Integer.MIN_VALUE; layerLeft = 0; layerRound = 0;
+            skippedPos.clear(); recent.clear(); escaping = false; escapeCount = 0; cleanFinal = false; cleanedForLayer = Integer.MIN_VALUE;
             refYaw = mc.player.getYaw();
             Util.chat(mc, "§aBẮT ĐẦU XÂY§r – " + targets.size() + " vị trí, từng tầng từ dưới lên"
                     + (approved ? "." : " (chỉ dùng đồ có sẵn trong kho)."));
@@ -167,6 +182,8 @@ public final class Builder {
             mc.options.jumpKey.setPressed(false);
             stack.clear();
             focus = null;
+            escaping = false;
+            cleaningUp = false;
             curLayer = Integer.MIN_VALUE;
             Util.chat(mc, "§cĐÃ DỪNG§r.");
         }
@@ -185,7 +202,7 @@ public final class Builder {
         WorldSchematic sw = SchematicWorldHandler.getSchematicWorld();
         if (scanner.st == Scanner.St.RUNNING) {
             if (sw == null) scanner.st = Scanner.St.IDLE;
-            else scanner.tick(mc, sw, 40_000);
+            else scanner.tick(mc, sw, (long) Math.max(1, enabled ? Config.scanMsPerTick / 2 : Config.scanMsPerTick) * 1_000_000L);
         }
         if (scanner.consumeFresh()) {
             if (enabled) targets = new ArrayList<>(scanner.found);
@@ -202,16 +219,27 @@ public final class Builder {
 
         tick++;
         mover.tick(mc);
-        if (--rescanIn <= 0 && scanner.st != Scanner.St.RUNNING) { scanner.start(mc); rescanIn = 100; }
+        if (--rescanIn <= 0 && scanner.st != Scanner.St.RUNNING) { scanner.startQuick(mc); rescanIn = 200; }
+        if (tick % 20 == 0) recoverItems(mc);
+        recent.values().removeIf(exp -> exp <= tick);
 
+        if (escaping) { escapeStep(mc, sw); return; }
         if (cleaningUp) { cleanupStep(mc); return; }
 
         if (stack.isEmpty()) {
             if (tick < nextActionTick) return;       // delay giữa các block do người dùng chỉnh
+            if (Config.fastMode) {
+                int n = fastBurst(mc, sw);
+                if (n > 0) { nextActionTick = tick + Config.fastDelayTicks; return; }
+                if (cleaningUp || escaping) return;
+            }
+        }
+        if (stack.isEmpty()) {
             Task t = pickTask(mc, sw);
             if (t == null) {
                 focus = null;
-                if (!scaffolds.isEmpty()) { cleaningUp = true; return; }
+                if (cleaningUp) return;               // pickTask vừa yêu cầu dọn giàn giáo giữa các tầng
+                if (!scaffolds.isEmpty()) { cleaningUp = true; cleanFinal = true; return; }
                 Util.chat(mc, "§aHoàn thành§r (trong vùng quét). Bỏ qua " + blacklist.size() + " vị trí không xử lý được." + missingSummary());
                 setEnabled(mc, false);
                 return;
@@ -219,6 +247,127 @@ public final class Builder {
             stack.push(t);
         }
         runTask(mc, sw, stack.peek());
+    }
+
+    // ------------------------------------------------------------------ đặt nhanh (kiểu Easy Place)
+
+    /**
+     * Đặt liền nhiều block trong 1 tick, ngay từ chỗ đang đứng: chỉ báo hướng nhìn cho server (không chờ xoay đầu),
+     * vẫn dùng đúng bộ lập kế hoạch (nhìn thấy thẳng, trong 4 block, không xuyên tường). Block nào không đặt được từ
+     * chỗ này thì dùng đường chậm (đi tới / giàn giáo / cột). Trả về số block đã đặt.
+     */
+    private int fastBurst(MinecraftClient mc, WorldSchematic sw) {
+        ClientPlayerEntity p = mc.player;
+        int placed = 0, max = Math.max(1, Config.placePerTick);
+        for (int k = 0; k < max; k++) {
+            Task t = pickTask(mc, sw);
+            if (t == null || cleaningUp) return placed;
+            boolean ok = false;
+            if (t.kind == Kind.PLACE && t.item != null && !recent.containsKey(t.pos) && Util.count(p, t.item) > 0) {
+                Planner.Plan pl = Planner.solvePlace(mc, p.getEyePos(), Util.pos(p), t.pos, t.want, t.item, Set.of(), t.banned);
+                if (pl != null && Util.selectNow(mc, t.item)) {
+                    Util.silentLook(mc, pl.yaw(), pl.pitch());
+                    Util.useBlock(mc, new BlockHitResult(pl.hit(), pl.face(), pl.clicked(), false), false);
+                    recent.put(t.pos, tick + Math.max(2, Config.ackTicks));
+                    focus = t.pos;
+                    placed++;
+                    ok = true;
+                }
+            }
+            if (!ok) {
+                if (placed == 0) stack.push(t);       // không đặt nhanh được -> chạy đường chậm
+                return placed;
+            }
+        }
+        return placed;
+    }
+
+    /** Nhặt thêm được món từng bị coi là "không có" -> làm lại các vị trí đã bỏ qua vì nó. */
+    private void recoverItems(MinecraftClient mc) {
+        if (unobtainable.isEmpty()) return;
+        Iterator<Item> it = unobtainable.iterator();
+        while (it.hasNext()) {
+            Item i = it.next();
+            if (Util.count(mc.player, i) <= 0) continue;
+            it.remove();
+            Set<BlockPos> ps = skippedPos.remove(i);
+            if (ps != null) blacklist.removeAll(ps);
+            skippedByItem.remove(i);
+            buyTries.remove(i);
+        }
+    }
+
+    // ------------------------------------------------------------------ thoát khi bị kẹt
+
+    /** Bị kẹt (cột giàn giáo, hộp kín...) -> tự tìm đường ra, đào những gì đào được (không động vào đá đỏ). */
+    private boolean startEscape(MinecraftClient mc, WorldSchematic sw) {
+        if (escapeCount >= 6) return false;
+        Nav nav = new Nav(mc, sw);
+        List<Nav.RStep> path = nav.escape(mc.player.getBlockPos(), scaffolds, 4000);
+        if (path == null || path.isEmpty()) return false;
+        escape = path;
+        escIdx = 0; escFails = 0; escWalking = false;
+        escDeadline = tick + 60 * path.size() + 300;
+        escaping = true;
+        escapeCount++;
+        stack.clear();
+        mover.stop(mc);
+        Util.chat(mc, "Đang bị kẹt – tự tìm đường thoát (" + path.size() + " bước).");
+        return true;
+    }
+
+    private void escapeStep(MinecraftClient mc, WorldSchematic sw) {
+        ClientPlayerEntity p = mc.player;
+        ClientWorld w = mc.world;
+        if (escape == null || escIdx >= escape.size() || tick > escDeadline) { finishEscape(mc); return; }
+        Nav.RStep s = escape.get(escIdx);
+        focus = s.pos;
+
+        for (BlockPos c : s.dig) {                       // đào những ô còn chắn
+            if (!w.getBlockState(c).getCollisionShape(w, c).isEmpty()) {
+                mover.stop(mc);
+                escWalking = false;
+                digCell(mc, c);
+                return;
+            }
+        }
+        mc.interactionManager.cancelBlockBreaking();
+
+        if (s.down) {                                    // đã đào sàn: chờ rơi xuống
+            if (p.getBlockPos().getY() <= s.pos.getY() && p.isOnGround()) { escIdx++; escWalking = false; }
+            return;
+        }
+        if (!escWalking) { mover.follow(List.of(s.pos)); escWalking = true; return; }
+        if (mover.failed()) {
+            mover.stop(mc);
+            escWalking = false;
+            if (++escFails > 6) finishEscape(mc);
+        } else if (mover.arrived()) {
+            mover.stop(mc);
+            escIdx++;
+            escWalking = false;
+        }
+    }
+
+    private void digCell(MinecraftClient mc, BlockPos c) {
+        ClientPlayerEntity p = mc.player;
+        Util.bestTool(mc, mc.world.getBlockState(c));
+        Direction face = Direction.UP;
+        Planner.Plan pl = Planner.solveClick(mc, p.getEyePos(), Util.pos(p), c, null, Set.of());
+        if (pl != null) { Util.look(mc, pl.yaw(), pl.pitch()); face = pl.face(); }
+        else Util.lookAt(mc, Vec3d.ofCenter(c));
+        mc.interactionManager.updateBlockBreakingProgress(c, face);
+        p.swingHand(Hand.MAIN_HAND);
+    }
+
+    private void finishEscape(MinecraftClient mc) {
+        escaping = false;
+        escape = null;
+        mover.stop(mc);
+        mc.options.jumpKey.setPressed(false);
+        mc.interactionManager.cancelBlockBreaking();
+        stack.clear();
+        badSpots.clear();
     }
 
     // ------------------------------------------------------------------ chọn việc
@@ -250,7 +399,12 @@ public final class Builder {
                 if (!unobtainable.isEmpty() && act == StateDiff.Act.PLACE) {   // món đã biết là không có -> bỏ qua êm
                     ItemStack pk = schem.getPickStack(sw, pos, false);
                     Item it = pk.isEmpty() ? schem.getBlock().asItem() : pk.getItem();
-                    if (unobtainable.contains(it)) { skippedByItem.merge(it, 1, Integer::sum); blacklist.add(pos); continue; }
+                    if (unobtainable.contains(it)) {
+                        skippedByItem.merge(it, 1, Integer::sum);
+                        skippedPos.computeIfAbsent(it, k -> new HashSet<>()).add(pos);
+                        blacklist.add(pos);
+                        continue;
+                    }
                 }
                 if (layer == null) layer = pos.getY();
                 if (deferred.contains(pos)) { hadDeferred = true; layerLeft++; continue; }
@@ -260,7 +414,16 @@ public final class Builder {
             }
 
             if (layer == null) { curLayer = Integer.MIN_VALUE; layerLeft = 0; return null; }   // xong hết
-            if (layer != curLayer) startLayer(mc, layer, cands);
+            if (layer != curLayer) {
+                // sang tầng mới: phá hết giàn giáo của tầng trước cho gọn (tự tìm đường thoát nếu bị kẹt)
+                if (curLayer != Integer.MIN_VALUE && !scaffolds.isEmpty() && cleanedForLayer != layer) {
+                    cleanedForLayer = layer;
+                    cleaningUp = true;
+                    cleanFinal = false;
+                    return null;
+                }
+                startLayer(mc, layer, cands);
+            }
             layerLeft = cands.size() + (hadDeferred ? countDeferred(layer) : 0);
 
             if (cands.isEmpty()) {
@@ -361,7 +524,11 @@ public final class Builder {
             case MOVE -> {
                 if (mover.failed()) {
                     mover.stop(mc);
-                    if (++t.replans > 3) { fail(mc, t, "không đi tới được chỗ đứng"); return; }
+                    if (++t.replans > 3) {
+                        if (startEscape(mc, sw)) return;
+                        fail(mc, t, "không đi tới được chỗ đứng");
+                        return;
+                    }
                     t.phase = Phase.PLAN;
                 } else if (mover.arrived()) {
                     mover.stop(mc);
@@ -405,7 +572,7 @@ public final class Builder {
         mover.stop(mc);
         if (ok) {
             if (t.scaffold) scaffolds.add(t.pos);
-            else { targetFails.remove(t.pos); deferred.remove(t.pos); badSpots.clear(); }
+            else { targetFails.remove(t.pos); deferred.remove(t.pos); badSpots.clear(); escapeCount = 0; }
             nextActionTick = tick + (t.kind == Kind.CLICK ? Config.adjustDelayTicks : Config.delayTicks);
         } else {
             if (t.scaffold) badSpots.add(t.pos);
@@ -457,6 +624,7 @@ public final class Builder {
         // không có cách trực tiếp -> thử giàn giáo làm điểm tựa, rồi dựng cột để leo
         if (t.kind == Kind.PLACE && trySupportScaffold(mc, sw, t)) return;
         if (tryPillar(mc, sw, t)) return;
+        if (startEscape(mc, sw)) return;          // có thể đang bị kẹt trên cột / trong hộp kín
         fail(mc, t, "không tìm được cách đặt hợp lệ (không xuyên tường, trong 4 block)");
     }
 
@@ -474,7 +642,7 @@ public final class Builder {
             if (!sw.getBlockState(s).isAir()) continue;               // không chiếm chỗ của block thật sau này
             Planner.Found f = Planner.find(mc, sw, Vec3d.ofCenter(t.pos), solverFor(mc, t, Set.of(s)));
             if (f == null) continue;
-            double c = f.cost() + (d == Direction.DOWN ? 0 : 1);
+            double c = f.cost() + (d == Direction.DOWN ? 0 : 1) - 1.5 * pendingNeighbours(mc, sw, s, t.pos);
             if (c < bestC) { bestC = c; bestS = s; }
         }
         if (bestS == null) return false;
@@ -488,6 +656,18 @@ public final class Builder {
         st.depth = t.depth + 1;
         stack.push(st);
         return true;
+    }
+
+    /** Số block kế bên ô s còn cần xây (ngoài chính nó): giàn giáo đặt chỗ nhiều block cần tựa sẽ được dùng lại -> gọn hơn. */
+    private int pendingNeighbours(MinecraftClient mc, WorldSchematic sw, BlockPos s, BlockPos self) {
+        int n = 0;
+        for (Direction d : Direction.values()) {
+            BlockPos q = s.offset(d);
+            if (q.equals(self) || sw.getBlockState(q).isAir() || blacklist.contains(q)) continue;
+            StateDiff.Act a = StateDiff.diff(mc.world.getBlockState(q), sw.getBlockState(q));
+            if (a == StateDiff.Act.PLACE || a == StateDiff.Act.PLACE_SLAB) n++;
+        }
+        return n;
     }
 
     private boolean scaffoldOnStack(BlockPos p) {
@@ -672,6 +852,7 @@ public final class Builder {
         } else {
             stack.clear();
             blacklist.add(t.pos);
+            skippedPos.computeIfAbsent(item, k -> new HashSet<>()).add(t.pos);
         }
     }
 
@@ -708,6 +889,8 @@ public final class Builder {
         if (scaffolds.isEmpty()) {
             cleaningUp = false;
             mover.stop(mc);
+            mc.interactionManager.cancelBlockBreaking();
+            if (!cleanFinal) return;                 // dọn giữa các tầng: xong thì xây tiếp
             Util.chat(mc, "§aHoàn thành§r và đã dọn giàn giáo. Bỏ qua " + blacklist.size() + " vị trí không xử lý được." + missingSummary());
             setEnabled(mc, false);
             return;
@@ -717,6 +900,7 @@ public final class Builder {
         BlockPos below = p.getBlockPos().down();
         if (p.isOnGround() && scaffolds.contains(below)) {
             mover.stop(mc);
+            Util.bestTool(mc, w.getBlockState(below));
             Util.look(mc, p.getYaw(), 90f);
             mc.interactionManager.updateBlockBreakingProgress(below, Direction.UP);
             p.swingHand(Hand.MAIN_HAND);
@@ -731,6 +915,7 @@ public final class Builder {
             final BlockPos hiF = hi;
             Planner.Found f = Planner.find(mc, sw, Vec3d.ofCenter(hiF), (eye, feet) -> Planner.solveClick(mc, eye, feet, hiF, null, Set.of()));
             if (f == null) {
+                if (startEscape(mc, sw)) return;       // có thể đang kẹt: tự thoát rồi dọn tiếp
                 Util.chat(mc, "§eKhông dọn được giàn giáo ở " + hi.toShortString());
                 scaffolds.remove(hi);
                 return;
@@ -748,6 +933,7 @@ public final class Builder {
 
         Planner.Plan pl = Planner.solveClick(mc, p.getEyePos(), Util.pos(p), cleanTarget, null, Set.of());
         if (pl == null) { cleanTarget = null; return; }       // chọn lại
+        Util.bestTool(mc, w.getBlockState(cleanTarget));
         Util.look(mc, pl.yaw(), pl.pitch());
         mc.interactionManager.updateBlockBreakingProgress(cleanTarget, pl.face());
         p.swingHand(Hand.MAIN_HAND);

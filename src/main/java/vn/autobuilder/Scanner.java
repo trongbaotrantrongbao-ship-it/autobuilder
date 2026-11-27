@@ -37,7 +37,7 @@ public final class Scanner {
     private int[] b;
     private int x, y, z;
     private long scanned, total;
-    private boolean fresh;
+    private boolean fresh, quick;
 
     private static final int VOXEL_CAP = 120_000;
 
@@ -46,7 +46,11 @@ public final class Scanner {
     /** true đúng 1 lần sau khi vừa quét xong. */
     public boolean consumeFresh() { boolean f = fresh; fresh = false; return f; }
 
+    /** Quét lại khi đang xây: bỏ qua dựng xem trước 3D cho nhanh. */
+    public void startQuick(MinecraftClient mc) { start(mc); quick = true; }
+
     public void start(MinecraftClient mc) {
+        quick = false;
         b = Region.bounds(mc);
         x = b[0]; y = b[1]; z = b[2];
         wFound = new ArrayList<>();
@@ -58,19 +62,23 @@ public final class Scanner {
         st = St.RUNNING;
     }
 
-    public void tick(MinecraftClient mc, WorldSchematic sw, int budget) {
+    public void tick(MinecraftClient mc, WorldSchematic sw, long maxNanos) {
         if (st != St.RUNNING) return;
+        final long t0 = System.nanoTime();
         ClientWorld w = mc.world;
         BlockPos.Mutable m = new BlockPos.Mutable();
         BlockPos.Mutable m2 = new BlockPos.Mutable();
 
-        for (int i = 0; i < budget; i++) {
+        for (int i = 0; ; i++) {
+            if ((i & 127) == 127 && System.nanoTime() - t0 > maxNanos) return;
             m.set(x, y, z);
             scanned++;
             BlockState s = sw.getBlockState(m);
             if (!s.isAir()) {
                 wSnap.total++;
-                if (wSnap.n < VOXEL_CAP) {
+                if (quick) {
+                    // không cần snapshot khi quét nhanh
+                } else if (wSnap.n < VOXEL_CAP) {
                     boolean exposed = false;
                     boolean top = false;
                     for (net.minecraft.util.math.Direction d : net.minecraft.util.math.Direction.values()) {
@@ -133,10 +141,9 @@ public final class Scanner {
         BlockPos c = mc.player != null ? mc.player.getBlockPos() : BlockPos.ORIGIN;
         wFound.sort(Comparator.<BlockPos>comparingInt(BlockPos::getY)
                 .thenComparingDouble(p -> p.getSquaredDistance(c)));
-        wSnap.finish();
+        if (!quick) { wSnap.finish(); snap = wSnap; }
         found = wFound;
         required = wReq;
-        snap = wSnap;
         blocked = wBlocked;
         bounds = b;
         version++;
