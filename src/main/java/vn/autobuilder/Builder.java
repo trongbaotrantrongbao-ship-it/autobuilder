@@ -69,6 +69,9 @@ public final class Builder {
 
     // đặt nhanh: block vừa đặt, chờ server xác nhận
     private final Map<BlockPos, Integer> recent = new HashMap<>();
+    private final Map<BlockPos, String> recentKey = new HashMap<>();
+    private final Map<BlockPos, Integer> fastFails = new HashMap<>();
+    private final Map<BlockPos, Set<String>> fastBanned = new HashMap<>();
     // block bị bỏ qua vì thiếu đồ -> nhặt được đồ thì tự làm lại
     private final Map<Item, Set<BlockPos>> skippedPos = new HashMap<>();
 
@@ -172,7 +175,7 @@ public final class Builder {
             targetFails.clear(); blacklist.clear(); badSpots.clear(); stack.clear();
             buyTries.clear(); unobtainable.clear(); skippedByItem.clear(); rescanIn = 100; cleaningUp = false; cleanTarget = null;
             deferred.clear(); curLayer = Integer.MIN_VALUE; layerLeft = 0; layerRound = 0;
-            skippedPos.clear(); recent.clear(); escaping = false; escapeCount = 0; cleanFinal = false; cleanedForLayer = Integer.MIN_VALUE;
+            skippedPos.clear(); recent.clear(); recentKey.clear(); fastFails.clear(); fastBanned.clear(); escaping = false; escapeCount = 0; cleanFinal = false; cleanedForLayer = Integer.MIN_VALUE;
             refYaw = mc.player.getYaw();
             Util.chat(mc, "§aBẮT ĐẦU XÂY§r – " + targets.size() + " vị trí, từng tầng từ dưới lên"
                     + (approved ? "." : " (chỉ dùng đồ có sẵn trong kho)."));
@@ -221,7 +224,7 @@ public final class Builder {
         mover.tick(mc);
         if (--rescanIn <= 0 && scanner.st != Scanner.St.RUNNING) { scanner.startQuick(mc); rescanIn = 200; }
         if (tick % 20 == 0) recoverItems(mc);
-        recent.values().removeIf(exp -> exp <= tick);
+        verifyRecent(mc, sw);
 
         if (escaping) { escapeStep(mc, sw); return; }
         if (cleaningUp) { cleanupStep(mc); return; }
@@ -258,28 +261,67 @@ public final class Builder {
      */
     private int fastBurst(MinecraftClient mc, WorldSchematic sw) {
         ClientPlayerEntity p = mc.player;
+        List<Cand> cands = collect(mc, sw);
+        if (cands == null || cleaningUp) return 0;
+
+        // mọi block của tầng đang xây nằm trong hình cầu bán kính tầm với quanh mắt, theo thứ tự xây
+        Vec3d eye = p.getEyePos();
+        double lim = Config.reach + 0.9;
+        List<Cand> near = new ArrayList<>();
+        for (Cand c : cands) {
+            if (recent.containsKey(c.pos()) || fastFails.getOrDefault(c.pos(), 0) >= 2) continue;
+            if (Vec3d.ofCenter(c.pos()).squaredDistanceTo(eye) <= lim * lim) near.add(c);
+        }
+        if (near.isEmpty()) return 0;
+        near.sort(this::order);
+
         int placed = 0, max = Math.max(1, Config.placePerTick);
-        for (int k = 0; k < max; k++) {
-            Task t = pickTask(mc, sw);
-            if (t == null || cleaningUp) return placed;
-            boolean ok = false;
-            if (t.kind == Kind.PLACE && t.item != null && !recent.containsKey(t.pos) && Util.count(p, t.item) > 0) {
-                Planner.Plan pl = Planner.solvePlace(mc, p.getEyePos(), Util.pos(p), t.pos, t.want, t.item, Set.of(), t.banned);
-                if (pl != null && Util.selectNow(mc, t.item)) {
-                    Util.silentLook(mc, pl.yaw(), pl.pitch());
-                    Util.useBlock(mc, new BlockHitResult(pl.hit(), pl.face(), pl.clicked(), false), false);
-                    recent.put(t.pos, tick + Math.max(2, Config.ackTicks));
-                    focus = t.pos;
-                    placed++;
-                    ok = true;
-                }
-            }
-            if (!ok) {
-                if (placed == 0) stack.push(t);       // không đặt nhanh được -> chạy đường chậm
-                return placed;
+        long t0 = System.nanoTime();
+        boolean progress = true;
+        Set<BlockPos> tried = new HashSet<>();
+        while (progress && placed < max && System.nanoTime() - t0 < 5_000_000L) {
+            progress = false;
+            for (Cand c : near) {
+                if (placed >= max || System.nanoTime() - t0 > 5_000_000L) break;
+                if (tried.contains(c.pos()) || recent.containsKey(c.pos())) continue;
+                if (c.act() != StateDiff.Act.PLACE) continue;
+                BlockState schem = sw.getBlockState(c.pos());
+                if (!StateDiff.diff(mc.world.getBlockState(c.pos()), schem).equals(StateDiff.Act.PLACE)) continue;
+                ItemStack pk = schem.getPickStack(sw, c.pos(), false);
+                Item item = pk.isEmpty() ? schem.getBlock().asItem() : pk.getItem();
+                if (item == Items.AIR || Util.count(p, item) <= 0) continue;
+
+                Set<String> ban = fastBanned.getOrDefault(c.pos(), Set.of());
+                Planner.Plan pl = Planner.solvePlace(mc, eye, Util.pos(p), c.pos(), schem, item, Set.of(), ban);
+                if (pl == null) { continue; }                         // từ chỗ này chưa đặt được (chưa có điểm tựa...) -> thử lại sau khi đặt xong cái khác
+                if (!Util.selectNow(mc, item)) { tried.add(c.pos()); continue; }   // món nằm trong kho, không ở hotbar -> đường chậm
+                Util.silentLook(mc, pl.yaw(), pl.pitch());
+                Util.useBlock(mc, new BlockHitResult(pl.hit(), pl.face(), pl.clicked(), false), false);
+                recent.put(c.pos(), tick + Math.max(3, Config.ackTicks));
+                recentKey.put(c.pos(), pl.key());
+                focus = c.pos();
+                placed++;
+                progress = true;
             }
         }
         return placed;
+    }
+
+    /** Sau khi hết thời gian chờ: block nào vẫn chưa đúng thì cấm cách đặt đó; 2 lần hỏng thì chuyển sang đường chậm (kiểm tra kỹ). */
+    private void verifyRecent(MinecraftClient mc, WorldSchematic sw) {
+        Iterator<Map.Entry<BlockPos, Integer>> it = recent.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<BlockPos, Integer> e = it.next();
+            if (e.getValue() > tick) continue;
+            BlockPos pos = e.getKey();
+            it.remove();
+            String key = recentKey.remove(pos);
+            StateDiff.Act a = StateDiff.diff(mc.world.getBlockState(pos), sw.getBlockState(pos));
+            if (a == StateDiff.Act.DONE || a == StateDiff.Act.SKIP || a == StateDiff.Act.ADJUST || a == StateDiff.Act.WATERLOG
+                    || a == StateDiff.Act.PLACE_SLAB) { fastFails.remove(pos); continue; }
+            fastFails.merge(pos, 1, Integer::sum);
+            if (key != null) fastBanned.computeIfAbsent(pos, k -> new HashSet<>()).add(key);
+        }
     }
 
     /** Nhặt thêm được món từng bị coi là "không có" -> làm lại các vị trí đã bỏ qua vì nó. */
@@ -381,10 +423,18 @@ public final class Builder {
      * trong mỗi nhóm đi theo đường rắn (hàng này hết mới sang hàng kế) nên không bị lộn xộn.
      */
     private Task pickTask(MinecraftClient mc, WorldSchematic sw) {
-        ClientWorld w = mc.world;
-        Cand chosen = null;
+        List<Cand> cands = collect(mc, sw);
+        if (cands == null) return null;
+        Cand best = null;
+        for (Cand c : cands) if (best == null || order(c, best) < 0) best = c;
+        return makeTask(mc, sw, best);
+    }
 
-        for (int attempt = 0; attempt < 2 && chosen == null; attempt++) {
+    /** Danh sách việc của tầng thấp nhất còn việc (null = hết việc, hoặc đang dọn giàn giáo giữa tầng). */
+    private List<Cand> collect(MinecraftClient mc, WorldSchematic sw) {
+        ClientWorld w = mc.world;
+
+        for (int attempt = 0; attempt < 2; attempt++) {
             Integer layer = null;
             List<Cand> cands = new ArrayList<>();
             boolean hadDeferred = false;
@@ -433,12 +483,13 @@ public final class Builder {
                 continue;
             }
 
-            Cand best = null;
-            for (Cand c : cands) if (best == null || order(c, best) < 0) best = c;
-            chosen = best;
+            return cands;
         }
-        if (chosen == null) return null;
+        return null;
+    }
 
+    private Task makeTask(MinecraftClient mc, WorldSchematic sw, Cand chosen) {
+        ClientWorld w = mc.world;
         Util.status(mc, "Tầng Y=" + curLayer + " – còn " + layerLeft + " block" + (layerRound > 0 ? " (thử lại lần " + layerRound + ")" : ""));
 
         BlockPos best = chosen.pos();

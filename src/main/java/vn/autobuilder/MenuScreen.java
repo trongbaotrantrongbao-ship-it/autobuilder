@@ -204,6 +204,9 @@ public class MenuScreen extends Screen {
                     v -> Config.aimSpeed = (int) Math.round(v));
             y += 24;
         }
+        slider(c, x, y, w, "Bán kính đặt (hình cầu, tối đa 4)", 2.5, 4.0, Config.reach, String.format("%.1f block", Config.reach),
+                v -> Config.reach = Math.round(v * 10) / 10.0);
+        y += 24;
         slider(c, x, y, w, "Delay khi chỉnh (repeater...)", 0, 20, Config.adjustDelayTicks,
                 Config.adjustDelayTicks + " tick", v -> Config.adjustDelayTicks = (int) Math.round(v));
         y += 24;
