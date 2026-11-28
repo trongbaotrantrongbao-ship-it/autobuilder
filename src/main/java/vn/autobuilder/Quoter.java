@@ -33,7 +33,7 @@ public final class Quoter {
         lines.clear(); queue.clear();
         total = 0; allEnough = true; totalItems = 0; idx = 0; current = null;
         for (Map.Entry<Item, Integer> e : required.entrySet()) {
-            int have = Util.count(mc.player, e.getKey());
+            int have = Util.count(mc.player, e.getKey()) + (Config.useChests ? AutoBuilderMod.CHESTS.total(mc, e.getKey()) : 0);
             int need = e.getValue() - have;
             if (need > 0) queue.add(Map.entry(e.getKey(), need));
         }

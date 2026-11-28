@@ -29,7 +29,7 @@ public class MenuScreen extends Screen {
     private static final int RED       = 0xFFFF5C5C;
     private static final int AMBER     = 0xFFFFB84D;
 
-    private static final String[] TABS = {"Điều khiển", "Tốc độ", "Phạm vi", "Công trình 3D", "Báo giá"};
+    private static final String[] TABS = {"Điều khiển", "Tốc độ", "Kho rương", "Tùy chọn", "Phạm vi", "Công trình 3D", "Báo giá"};
 
     private static final class Hit {
         int x, y, w, h;
@@ -99,11 +99,11 @@ public class MenuScreen extends Screen {
         c.fill(px, py + 25, px + sbw, py + ph, PANEL);
         c.fill(px + sbw, py + 25, px + sbw + 1, py + ph, BORDER);
         for (int i = 0; i < TABS.length; i++) {
-            int ty = py + 32 + i * 24;
+            int ty = py + 30 + i * 22;
             boolean sel = tab == i;
-            Hit h = hit(px + 5, ty, sbw - 10, 20);
+            Hit h = hit(px + 5, ty, sbw - 10, 19);
             final int idx = i;
-            h.click = () -> { tab = idx; if (idx == 3) lastVersion = -1; };
+            h.click = () -> { tab = idx; if (idx == 5) lastVersion = -1; };
             boolean hov = h.in(mx, my);
             c.fill(h.x, h.y, h.x + h.w, h.y + h.h, sel ? ACCENT : (hov ? PANEL_HI : PANEL));
             if (sel) c.fill(h.x, h.y, h.x + 2, h.y + h.h, 0xFFFFFFFF);
@@ -114,8 +114,10 @@ public class MenuScreen extends Screen {
         switch (tab) {
             case 0 -> tabControl(c, cx, cy, cw, ch);
             case 1 -> tabSpeed(c, cx, cy, cw, ch);
-            case 2 -> tabRange(c, cx, cy, cw, ch);
-            case 3 -> tabPreview(c, cx, cy, cw, ch);
+            case 2 -> tabChests(c, cx, cy, cw, ch);
+            case 3 -> tabOptions(c, cx, cy, cw, ch);
+            case 4 -> tabRange(c, cx, cy, cw, ch);
+            case 5 -> tabPreview(c, cx, cy, cw, ch);
             default -> tabQuote(c, cx, cy, cw, ch);
         }
 
@@ -166,8 +168,49 @@ public class MenuScreen extends Screen {
         y += 6;
 
         if (b.hasLayer()) { line(c, x, y, "Đang xây tầng Y=" + b.layerY() + "  (còn " + b.layerLeft() + " block trong tầng)", GREEN); y += 12; }
+        if (b.isEnabled() || b.placed() > 0) { line(c, x, y, "Tiến độ: " + b.percent() + "%   ·   đã đặt " + b.placed() + " block", GREEN); y += 12; }
         line(c, x, y, "Còn lại: " + b.remaining() + " vị trí   Bỏ qua: " + b.skipped(), TEXT); y += 12;
         line(c, x, y, "Đã chi: " + Util.money(b.spentSinceStart()) + (b.isApproved() ? " / ngân sách " + Util.money(b.budgetCap()) : ""), MUTED);
+    }
+
+    // ----------------------------------------------------------------- tab Kho rương
+    private void tabChests(DrawContext c, int x, int y, int w, int h) {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        ChestManager cm = AutoBuilderMod.CHESTS;
+        boolean busy = cm.busy();
+        int bw = (w - 16) / 3;
+        button(c, x, y, bw, 20, busy ? "Đang chạy..." : "Quét rương kho", ACCENT, !busy, () -> { cm.startScan(mc); close(); });
+        button(c, x + bw + 8, y, bw, 20, "Dừng", RED, busy, () -> cm.cancel(mc));
+        button(c, x + 2 * (bw + 8), y, bw, 20, "Xóa nhớ", AMBER, !busy, () -> { cm.clear(mc); toast("Đã xóa nhớ rương"); });
+        y += 26;
+        toggle(c, x, y, w, "Lấy đồ từ rương trước khi mua", Config.useChests, v -> Config.useChests = v);
+        y += 20;
+        slider(c, x, y, w, "Bán kính tìm rương", 8, 128, Config.chestRadius, Config.chestRadius + " block",
+                v -> Config.chestRadius = (int) Math.round(v));
+        y += 24;
+        slider(c, x, y, w, "Nhịp mở / lấy đồ", 1, 10, Config.chestDelayTicks, Config.chestDelayTicks + " tick",
+                v -> Config.chestDelayTicks = (int) Math.round(v));
+        y += 26;
+        if (mc.world != null) {
+            int[] k = cm.counts(mc);
+            line(c, x, y, "Rương nhớ: " + k[0] + "  ·  đã quét: " + k[1] + "  ·  hết đồ: " + k[2] + "  ·  không mở được: " + k[3], TEXT);
+            y += 13;
+            for (var e : cm.topItems(mc, 7)) {
+                line(c, x, y, Util.englishName(e.getKey()) + " ×" + e.getValue(), MUTED);
+                y += 11;
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------- tab Tùy chọn
+    private void tabOptions(DrawContext c, int x, int y, int w, int h) {
+        toggle(c, x, y, w, "Thông báo của mod trong chat", Config.chatMessages, v -> Config.chatMessages = v); y += 20;
+        toggle(c, x, y, w, "Dòng trạng thái trên hotbar", Config.actionBar, v -> Config.actionBar = v); y += 20;
+        toggle(c, x, y, w, "Báo tiến độ trong chat mỗi 10%", Config.progressChat, v -> Config.progressChat = v); y += 20;
+        toggle(c, x, y, w, "Sửa block sai: đào bỏ rồi đặt lại", Config.fixWrong, v -> Config.fixWrong = v); y += 20;
+        toggle(c, x, y, w, "Viền đỏ quanh block sai", Config.showWrong, v -> Config.showWrong = v); y += 20;
+        toggle(c, x, y, w, "Giàn giáo bằng kính (nếu có)", Config.scaffoldGlass, v -> Config.scaffoldGlass = v); y += 24;
+        line(c, x, y, "Tắt thông báo chat vẫn giữ dòng trạng thái và tiến độ trong menu.", MUTED);
     }
 
     // ----------------------------------------------------------------- tab Tốc độ
@@ -495,8 +538,8 @@ public class MenuScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mx, double my, double h, double v) {
-        if (tab == 3) { pv.zoom = (float) Math.max(0.4, Math.min(4.0, pv.zoom * (v > 0 ? 1.1 : 0.9))); pv.dirty = true; return true; }
-        if (tab == 4) { quoteScroll -= (int) Math.signum(v) * 2; return true; }
+        if (tab == 5) { pv.zoom = (float) Math.max(0.4, Math.min(4.0, pv.zoom * (v > 0 ? 1.1 : 0.9))); pv.dirty = true; return true; }
+        if (tab == 6) { quoteScroll -= (int) Math.signum(v) * 2; return true; }
         return super.mouseScrolled(mx, my, h, v);
     }
 

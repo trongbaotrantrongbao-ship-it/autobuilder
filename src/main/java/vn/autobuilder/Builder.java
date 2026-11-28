@@ -80,6 +80,23 @@ public final class Builder {
     private List<Nav.RStep> escape;
     private int escIdx, escDeadline, escFails, escapeCount;
 
+    // tiến độ
+    private final Set<BlockPos> placedPos = new HashSet<>();
+    private int workTotal, pendingNow, lastPct;
+
+    // sửa block sai
+    private final Map<BlockPos, Integer> fixTries = new HashMap<>();
+
+    // chống kẹt
+    private boolean wandering;
+    private int lastPlaced = -1, lastProgress, nextBurstTick;
+    private Vec3d lastPos = Vec3d.ZERO;
+
+    // rương
+    private final Set<Item> chestTried = new HashSet<>();
+    private Item chestItem;
+    private boolean chestWasBusy;
+
     private double budgetCap, spentAtStart;
     private int tick, rescanIn, nextActionTick;
 
@@ -114,6 +131,9 @@ public final class Builder {
     public double spentSinceStart() { return buyer.spent - spentAtStart; }
     public int remaining() { return targets.size(); }
     public int skipped() { return blacklist.size(); }
+    public int placed() { return placedPos.size(); }
+    public int workTotal() { return workTotal; }
+    public int percent() { return workTotal <= 0 ? 0 : Math.max(0, Math.min(100, (int) ((workTotal - pendingNow) * 100L / workTotal))); }
     public boolean hasLayer() { return enabled && curLayer != Integer.MIN_VALUE; }
     public int layerY() { return curLayer; }
     public int layerLeft() { return layerLeft; }
@@ -127,7 +147,8 @@ public final class Builder {
     public Map<Item, Integer> missing(MinecraftClient mc) {
         Map<Item, Integer> out = new LinkedHashMap<>();
         for (Map.Entry<Item, Integer> e : scanner.required.entrySet()) {
-            int need = e.getValue() - Util.count(mc.player, e.getKey());
+            int need = e.getValue() - Util.count(mc.player, e.getKey())
+                    - (Config.useChests ? AutoBuilderMod.CHESTS.total(mc, e.getKey()) : 0);
             if (need > 0) out.put(e.getKey(), need);
         }
         return out;
@@ -177,10 +198,14 @@ public final class Builder {
             deferred.clear(); curLayer = Integer.MIN_VALUE; layerLeft = 0; layerRound = 0; restockItem = null; restockBusy = false;
             skippedPos.clear(); recent.clear(); recentKey.clear(); fastFails.clear(); fastBanned.clear(); escaping = false; escapeCount = 0; cleanFinal = false; cleanedForLayer = Integer.MIN_VALUE;
             refYaw = mc.player.getYaw();
+            placedPos.clear(); fixTries.clear(); chestTried.clear(); wandering = false; lastPlaced = -1; lastProgress = tick;
+            workTotal = Math.max(1, targets.size()); pendingNow = targets.size(); lastPct = 0;
             Util.chat(mc, "§aBẮT ĐẦU XÂY§r – " + targets.size() + " vị trí, từng tầng từ dưới lên"
                     + (approved ? "." : " (chỉ dùng đồ có sẵn trong kho)."));
         } else {
             buyer.cancel(mc);
+            AutoBuilderMod.CHESTS.cancel(mc);
+            wandering = false;
             mover.stop(mc);
             mc.options.jumpKey.setPressed(false);
             stack.clear();
@@ -214,10 +239,18 @@ public final class Builder {
 
         buyer.tick(mc);
         quoter.tick(mc, buyer);
+        ChestManager chests = AutoBuilderMod.CHESTS;
+        chests.tick(mc, sw);
+        boolean cb = chests.busy();
+        if (chestWasBusy && !cb) {
+            if (chestItem != null && chests.lastTook() > 0) chestTried.remove(chestItem);   // còn lấy được -> lần sau lấy tiếp
+            chestItem = null;
+        }
+        chestWasBusy = cb;
 
         if (!enabled) return;
-        if (buyer.busy()) { mover.stop(mc); return; }
-        if (restockItem != null && mc.currentScreen == null) { mover.stop(mc); tick++; restockStep(mc); return; }
+        if (buyer.busy() || cb) { mover.stop(mc); lastProgress = tick; return; }
+        if (restockItem != null && mc.currentScreen == null) { mover.stop(mc); tick++; lastProgress = tick; restockStep(mc); return; }
         if (mc.currentScreen != null) return;
         if (sw == null) { Util.status(mc, "Chưa nạp schematic Litematica."); return; }
 
@@ -226,31 +259,91 @@ public final class Builder {
         if (--rescanIn <= 0 && scanner.st != Scanner.St.RUNNING) { scanner.startQuick(mc); rescanIn = 200; }
         if (tick % 20 == 0) recoverItems(mc);
         verifyRecent(mc, sw);
+        if (tick % 10 == 0) updateProgress(mc, sw);
 
+        if (wandering) { if (mover.busy()) return; wandering = false; mover.stop(mc); }
         if (escaping) { escapeStep(mc, sw); return; }
         if (cleaningUp) { cleanupStep(mc); return; }
+        watchdog(mc, sw);
+        if (wandering || escaping) return;
 
-        if (stack.isEmpty()) {
-            if (tick < nextActionTick) return;       // delay giữa các block do người dùng chỉnh
-            if (Config.fastMode) {
-                int n = fastBurst(mc, sw);
-                if (n > 0) { nextActionTick = tick + Config.fastDelayTicks; return; }
-                if (cleaningUp || escaping) return;
-            }
+        // vừa đi vừa đặt: mỗi tick đặt mọi block trong tầm với, kể cả khi đang di chuyển tới chỗ khác
+        Task curTask = stack.peek();
+        if (Config.fastMode && tick >= nextBurstTick && (curTask == null || curTask.phase == Phase.MOVE || curTask.phase == Phase.PLAN)) {
+            int n = fastBurst(mc, sw);
+            if (n > 0) { nextBurstTick = tick + Config.fastDelayTicks; if (curTask == null) return; }
+            if (cleaningUp || escaping) { stack.clear(); return; }
         }
         if (stack.isEmpty()) {
+            if (tick < nextActionTick) return;       // delay giữa các block do người dùng chỉnh
             Task t = pickTask(mc, sw);
             if (t == null) {
                 focus = null;
                 if (cleaningUp) return;               // pickTask vừa yêu cầu dọn giàn giáo giữa các tầng
                 if (!scaffolds.isEmpty()) { cleaningUp = true; cleanFinal = true; return; }
-                Util.chat(mc, "§aHoàn thành§r (trong vùng quét). Bỏ qua " + blacklist.size() + " vị trí không xử lý được." + missingSummary());
+                Util.chat(mc, "§aHoàn thành§r – đã đặt " + placedPos.size() + " block. Bỏ qua " + blacklist.size() + " vị trí không xử lý được." + missingSummary());
                 setEnabled(mc, false);
                 return;
             }
             stack.push(t);
         }
         runTask(mc, sw, stack.peek());
+    }
+
+    // ------------------------------------------------------------------ tiến độ + chống kẹt
+
+    private void updateProgress(MinecraftClient mc, WorldSchematic sw) {
+        int n = 0;
+        for (BlockPos pos : targets) {
+            if (blacklist.contains(pos)) continue;
+            StateDiff.Act a = StateDiff.diff(mc.world.getBlockState(pos), sw.getBlockState(pos));
+            if (a != StateDiff.Act.DONE && a != StateDiff.Act.SKIP) n++;
+        }
+        pendingNow = n;
+        int pct = percent();
+        Util.status(mc, (hasLayer() ? "Tầng Y=" + curLayer + " · " : "") + "đã đặt " + placedPos.size() + " · " + pct + "% (còn " + n + ")");
+        if (Config.progressChat && pct / 10 > lastPct / 10) {
+            Util.chat(mc, "Tiến độ §a" + pct + "%§r – đã đặt " + placedPos.size() + " block, còn " + n + ".");
+        }
+        lastPct = pct;
+    }
+
+    /** Lâu không đặt được gì và không nhúc nhích -> bỏ việc đang kẹt (để sau), thoát/đổi chỗ đứng rồi lập kế hoạch lại. */
+    private void watchdog(MinecraftClient mc, WorldSchematic sw) {
+        Vec3d pos = Util.pos(mc.player);
+        if (placedPos.size() != lastPlaced || pos.squaredDistanceTo(lastPos) > 1.0 || tick < nextActionTick) {
+            lastPlaced = placedPos.size();
+            lastPos = pos;
+            lastProgress = tick;
+            return;
+        }
+        if (tick - lastProgress < 160) return;
+        lastProgress = tick;
+
+        Task cur = stack.peek();
+        if (cur != null && !cur.scaffold) {
+            deferred.add(cur.pos);
+            targetFails.merge(cur.pos, 1, Integer::sum);
+        }
+        stack.clear();
+        mover.stop(mc);
+        mc.options.jumpKey.setPressed(false);
+        badSpots.clear();
+        if (startEscape(mc, sw)) return;
+
+        Nav nav = new Nav(mc, sw);
+        List<Nav.Node> far = new ArrayList<>();
+        for (Nav.Node n : nav.reachable(mc.player.getBlockPos(), 10, 400)) if (n.cost >= 3 && n.cost <= 9) far.add(n);
+        if (far.isEmpty()) return;
+        Nav.Node n = far.get(rng.nextInt(far.size()));
+        mover.follow(n.path());
+        wandering = true;
+        Util.chat(mc, "Bị kẹt – đổi chỗ đứng và lập kế hoạch lại.");
+    }
+
+    private boolean fixable(ClientWorld w, BlockPos pos) {
+        BlockState s = w.getBlockState(pos);
+        return !s.isAir() && s.getFluidState().isEmpty() && s.getHardness(w, pos) >= 0 && !s.hasBlockEntity();
     }
 
     // ------------------------------------------------------------------ đặt nhanh (kiểu Easy Place)
@@ -319,7 +412,7 @@ public final class Builder {
             String key = recentKey.remove(pos);
             StateDiff.Act a = StateDiff.diff(mc.world.getBlockState(pos), sw.getBlockState(pos));
             if (a == StateDiff.Act.DONE || a == StateDiff.Act.SKIP || a == StateDiff.Act.ADJUST || a == StateDiff.Act.WATERLOG
-                    || a == StateDiff.Act.PLACE_SLAB) { fastFails.remove(pos); continue; }
+                    || a == StateDiff.Act.PLACE_SLAB) { fastFails.remove(pos); placedPos.add(pos); continue; }
             fastFails.merge(pos, 1, Integer::sum);
             if (key != null) fastBanned.computeIfAbsent(pos, k -> new HashSet<>()).add(key);
         }
@@ -439,6 +532,7 @@ public final class Builder {
             Integer layer = null;
             List<Cand> cands = new ArrayList<>();
             boolean hadDeferred = false;
+            int fixCount = 0;
 
             for (BlockPos pos : targets) {
                 if (blacklist.contains(pos)) continue;
@@ -446,7 +540,14 @@ public final class Builder {
                 BlockState schem = sw.getBlockState(pos);
                 StateDiff.Act act = StateDiff.diff(w.getBlockState(pos), schem);
                 if (act == StateDiff.Act.DONE || act == StateDiff.Act.SKIP) continue;
-                if (act == StateDiff.Act.BLOCKED) { blacklist.add(pos); continue; }
+                if (act == StateDiff.Act.BLOCKED) {
+                    if (!Config.fixWrong || !fixable(w, pos) || fixTries.getOrDefault(pos, 0) >= 2) { blacklist.add(pos); continue; }
+                    if (layer == null) layer = pos.getY();
+                    fixTries.merge(pos, 1, Integer::sum);
+                    scaffolds.add(pos);              // dọn như giàn giáo: đào bỏ block sai, sau đó vòng xây sẽ đặt lại đúng
+                    fixCount++;
+                    continue;
+                }
                 if (!unobtainable.isEmpty() && act == StateDiff.Act.PLACE) {   // món đã biết là không có -> bỏ qua êm
                     ItemStack pk = schem.getPickStack(sw, pos, false);
                     Item it = pk.isEmpty() ? schem.getBlock().asItem() : pk.getItem();
@@ -464,6 +565,12 @@ public final class Builder {
                 cands.add(new Cand(pos, act, prio));
             }
 
+            if (fixCount > 0) {
+                Util.chat(mc, "Có §c" + fixCount + "§r block sai ở tầng Y=" + layer + " – đào bỏ rồi đặt lại đúng.");
+                cleaningUp = true;
+                cleanFinal = false;
+                return null;
+            }
             if (layer == null) { curLayer = Integer.MIN_VALUE; layerLeft = 0; return null; }   // xong hết
             if (layer != curLayer) {
                 // sang tầng mới: phá hết giàn giáo của tầng trước cho gọn (tự tìm đường thoát nếu bị kẹt)
@@ -565,6 +672,14 @@ public final class Builder {
         BlockState ws = w.getBlockState(t.pos);
         focus = t.pos;
 
+        // không bao giờ đặt giàn giáo vào ô mà công trình cần cho block thật (ô chừa cho block chưa đặt)
+        if (t.scaffold && !sw.getBlockState(t.pos).isAir()) {
+            stack.remove(t);
+            badSpots.add(t.pos);
+            if (!stack.isEmpty()) stack.peek().phase = Phase.PLAN;
+            return;
+        }
+
         if (t.phase != Phase.PILLAR) {
             if (isDone(t, ws, sw)) { finish(mc, t, true); return; }
             if (isBlocked(t, ws, sw)) { finish(mc, t, false); return; }
@@ -585,6 +700,8 @@ public final class Builder {
                 } else if (mover.arrived()) {
                     mover.stop(mc);
                     t.phase = Phase.AIM;
+                } else if (!mover.busy()) {
+                    t.phase = Phase.PLAN;          // mover không còn chạy (bị dừng giữa chừng) -> lập kế hoạch lại
                 }
             }
 
@@ -624,7 +741,10 @@ public final class Builder {
         mover.stop(mc);
         if (ok) {
             if (t.scaffold) scaffolds.add(t.pos);
-            else { targetFails.remove(t.pos); deferred.remove(t.pos); badSpots.clear(); escapeCount = 0; }
+            else {
+                targetFails.remove(t.pos); deferred.remove(t.pos); badSpots.clear(); escapeCount = 0;
+                if (t.kind == Kind.PLACE) placedPos.add(t.pos);
+            }
             nextActionTick = tick + (t.kind == Kind.CLICK ? Config.adjustDelayTicks : Config.delayTicks);
         } else {
             if (t.scaffold) badSpots.add(t.pos);
@@ -867,6 +987,12 @@ public final class Builder {
 
     private boolean haveOrBuy(MinecraftClient mc, Item item, Task t) {
         if (Util.count(mc.player, item) > 0) return true;
+        if (Config.useChests && !chestTried.contains(item) && AutoBuilderMod.CHESTS.hasStock(mc, item)) {
+            chestTried.add(item);
+            chestItem = item;
+            AutoBuilderMod.CHESTS.startFetch(mc, item, Math.max(1, Math.min(remainingNeed(mc, item), Util.freeSpace(mc.player, item))));
+            return false;
+        }
         if (!Config.autoBuy || !approved || unobtainable.contains(item)) {
             skipMissing(mc, t, item);
             return false;
@@ -985,6 +1111,7 @@ public final class Builder {
             Item it = Registries.ITEM.get(Identifier.of(s.trim()));
             if (it instanceof BlockItem) list.add(it);
         }
+        if (Config.scaffoldGlass && Util.count(mc.player, Items.GLASS) > 0) return Items.GLASS;   // kính: nhìn xuyên qua, đào là vỡ ngay
         if (list.isEmpty()) return null;
         for (Item it : list) if (Util.count(mc.player, it) > 0) return it;
         for (Item it : list) if (!unobtainable.contains(it)) return it;   // chưa có trong kho: thử mua (nếu được phép)
@@ -1002,7 +1129,7 @@ public final class Builder {
             mover.stop(mc);
             mc.interactionManager.cancelBlockBreaking();
             if (!cleanFinal) return;                 // dọn giữa các tầng: xong thì xây tiếp
-            Util.chat(mc, "§aHoàn thành§r và đã dọn giàn giáo. Bỏ qua " + blacklist.size() + " vị trí không xử lý được." + missingSummary());
+            Util.chat(mc, "§aHoàn thành§r và đã dọn giàn giáo – đã đặt " + placedPos.size() + " block. Bỏ qua " + blacklist.size() + " vị trí không xử lý được." + missingSummary());
             setEnabled(mc, false);
             return;
         }

@@ -32,6 +32,15 @@ public final class Config {
     // ---- hành vi
     public static int aimSpeed = 25;          // tốc độ xoay đầu (độ / tick)
     public static int aimSettleTicks = 2;     // đợi đầu đứng yên bao nhiêu tick rồi mới đặt
+    public static boolean chatMessages = true;    // thông báo của mod trong chat (tắt được)
+    public static boolean actionBar = true;       // dòng trạng thái phía trên thanh hotbar
+    public static boolean progressChat = true;    // báo tiến độ trong chat mỗi 10%
+    public static boolean fixWrong = true;        // block sai: tự đào bỏ rồi đặt lại đúng
+    public static boolean showWrong = true;       // vẽ viền đỏ quanh block sai
+    public static boolean scaffoldGlass = true;   // ưu tiên kính làm giàn giáo (nếu có trong kho)
+    public static boolean useChests = true;       // lấy đồ từ rương đã nhớ trước khi mua
+    public static int chestRadius = 48;           // bán kính tìm rương
+    public static int chestDelayTicks = 2;        // nhịp mở rương / lấy đồ
     public static boolean fastMode = true;    // đặt nhanh kiểu "Easy Place": nhiều block / tick, không chờ xoay đầu
     public static int placePerTick = 3;       // số block tối đa mỗi tick ở chế độ nhanh
     public static int fastDelayTicks = 0;     // nghỉ giữa 2 đợt đặt ở chế độ nhanh

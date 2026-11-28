@@ -27,10 +27,11 @@ public final class Scanner {
     public List<BlockPos> found = new ArrayList<>();
     public Map<Item, Integer> required = new LinkedHashMap<>();
     public Snapshot snap;
+    public List<BlockPos> wrong = new ArrayList<>();   // block sai chỗ (vẽ viền đỏ)
     public int blocked;                    // số vị trí không xử lý được (block sai chỗ...)
     public int[] bounds;
 
-    private List<BlockPos> wFound;
+    private List<BlockPos> wFound, wWrong;
     private Map<Item, Integer> wReq;
     private Snapshot wSnap;
     private int wBlocked;
@@ -54,6 +55,7 @@ public final class Scanner {
         b = Region.bounds(mc);
         x = b[0]; y = b[1]; z = b[2];
         wFound = new ArrayList<>();
+        wWrong = new ArrayList<>();
         wReq = new LinkedHashMap<>();
         wSnap = new Snapshot();
         wBlocked = 0;
@@ -100,7 +102,12 @@ public final class Scanner {
                     StateDiff.Act a = StateDiff.diff(w.getBlockState(m), s);
                     switch (a) {
                         case DONE, SKIP -> {}
-                        case BLOCKED -> wBlocked++;
+                        case BLOCKED -> {
+                            wBlocked++;
+                            wWrong.add(m.toImmutable());
+                            wFound.add(m.toImmutable());       // sẽ đào bỏ rồi đặt lại đúng
+                            countNeeds(sw, m, s, w.getBlockState(m), StateDiff.Act.PLACE);
+                        }
                         default -> {
                             wFound.add(m.toImmutable());
                             countNeeds(sw, m, s, w.getBlockState(m), a);
@@ -143,6 +150,7 @@ public final class Scanner {
                 .thenComparingDouble(p -> p.getSquaredDistance(c)));
         if (!quick) { wSnap.finish(); snap = wSnap; }
         found = wFound;
+        wrong = wWrong;
         required = wReq;
         blocked = wBlocked;
         bounds = b;

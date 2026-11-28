@@ -15,6 +15,7 @@ import org.lwjgl.glfw.GLFW;
 public class AutoBuilderMod implements ClientModInitializer {
 
     public static final Builder BUILDER = new Builder();
+    public static final ChestManager CHESTS = new ChestManager();
     public static final Preview3D PREVIEW = new Preview3D();
 
     private static KeyBinding toggleKey;
@@ -23,6 +24,7 @@ public class AutoBuilderMod implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
         Config.load();
+        CHESTS.load();
 
         KeyBinding.Category cat = KeyBinding.Category.create(Identifier.of("autobuilder", "main"));
         toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(

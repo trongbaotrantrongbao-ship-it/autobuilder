@@ -160,11 +160,11 @@ public final class Util {
     }
 
     public static void status(MinecraftClient mc, String msg) {
-        if (mc.player != null) mc.player.sendMessage(Text.literal("[AutoBuilder] " + msg), true);
+        if (Config.actionBar && mc.player != null) mc.player.sendMessage(Text.literal("[AutoBuilder] " + msg), true);
     }
 
     public static void chat(MinecraftClient mc, String msg) {
-        if (mc.player != null) mc.player.sendMessage(Text.literal("§b[AutoBuilder]§r " + msg), false);
+        if (Config.chatMessages && mc.player != null) mc.player.sendMessage(Text.literal("§b[AutoBuilder]§r " + msg), false);
     }
 
     private Util() {}

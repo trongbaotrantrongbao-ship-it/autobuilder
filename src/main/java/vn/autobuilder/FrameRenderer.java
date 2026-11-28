@@ -20,11 +20,28 @@ public final class FrameRenderer {
         MinecraftClient mc = MinecraftClient.getInstance();
         if (mc.player == null || mc.world == null) return;
         boolean menu = mc.currentScreen instanceof MenuScreen;
-        if (!Config.showFrame && !menu) return;
+        boolean frame = Config.showFrame || menu;
+        if (!frame && !Config.showWrong) return;
 
         Vec3d cam = mc.gameRenderer.getCamera().getCameraPos();
         VertexConsumer vc = ctx.consumers().getBuffer(RenderLayers.lines());
         MatrixStack.Entry e = ctx.matrices().peek();
+
+        if (Config.showWrong) {                       // block sai so với Litematica: viền ĐỎ
+            var sw = fi.dy.masa.litematica.world.SchematicWorldHandler.getSchematicWorld();
+            if (sw != null) {
+                int n = 0;
+                for (BlockPos q : AutoBuilderMod.BUILDER.scanner.wrong) {
+                    if (n >= 1500) break;
+                    double dx = q.getX() + 0.5 - cam.x, dy = q.getY() + 0.5 - cam.y, dz = q.getZ() + 0.5 - cam.z;
+                    if (dx * dx + dy * dy + dz * dz > 96 * 96) continue;
+                    if (StateDiff.diff(mc.world.getBlockState(q), sw.getBlockState(q)) != StateDiff.Act.BLOCKED) continue;
+                    box(vc, e, cam, q.getX() - 0.01, q.getY() - 0.01, q.getZ() - 0.01, q.getX() + 1.01, q.getY() + 1.01, q.getZ() + 1.01, 0xFFFF2D2D, 3f);
+                    n++;
+                }
+            }
+        }
+        if (!frame) return;
 
         int[] b = Region.bounds(mc);
         int color;
