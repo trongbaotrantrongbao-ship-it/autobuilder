@@ -34,6 +34,16 @@ public final class Util {
         return c;
     }
 
+    /** Còn chứa thêm được bao nhiêu cái item này trong kho (ô trống + chỗ trống trong stack cùng loại). */
+    public static int freeSpace(ClientPlayerEntity p, Item item) {
+        int max = new ItemStack(item).getMaxCount(), sp = 0;
+        for (ItemStack s : p.getInventory().getMainStacks()) {
+            if (s.isEmpty()) sp += max;
+            else if (s.isOf(item)) sp += Math.max(0, max - s.getCount());
+        }
+        return sp;
+    }
+
     /** Chọn ngay item nếu nó nằm trong hotbar (không chờ). false nếu không ở hotbar. */
     public static boolean selectNow(MinecraftClient mc, Item item) {
         ClientPlayerEntity p = mc.player;

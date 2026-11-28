@@ -174,7 +174,7 @@ public final class Builder {
             targets = new ArrayList<>(scanner.found);
             targetFails.clear(); blacklist.clear(); badSpots.clear(); stack.clear();
             buyTries.clear(); unobtainable.clear(); skippedByItem.clear(); rescanIn = 100; cleaningUp = false; cleanTarget = null;
-            deferred.clear(); curLayer = Integer.MIN_VALUE; layerLeft = 0; layerRound = 0;
+            deferred.clear(); curLayer = Integer.MIN_VALUE; layerLeft = 0; layerRound = 0; restockItem = null; restockBusy = false;
             skippedPos.clear(); recent.clear(); recentKey.clear(); fastFails.clear(); fastBanned.clear(); escaping = false; escapeCount = 0; cleanFinal = false; cleanedForLayer = Integer.MIN_VALUE;
             refYaw = mc.player.getYaw();
             Util.chat(mc, "§aBẮT ĐẦU XÂY§r – " + targets.size() + " vị trí, từng tầng từ dưới lên"
@@ -217,6 +217,7 @@ public final class Builder {
 
         if (!enabled) return;
         if (buyer.busy()) { mover.stop(mc); return; }
+        if (restockItem != null && mc.currentScreen == null) { mover.stop(mc); tick++; restockStep(mc); return; }
         if (mc.currentScreen != null) return;
         if (sw == null) { Util.status(mc, "Chưa nạp schematic Litematica."); return; }
 
@@ -875,15 +876,74 @@ public final class Builder {
             Config.autoBuy = false;
             return false;
         }
-        int tries = buyTries.merge(item, 1, Integer::sum);
-        if (tries > Config.buyMaxTries) {
-            unobtainable.add(item);
-            skipMissing(mc, t, item);
-            return false;
-        }
-        buyer.start(mc, item);
+        // bắt đầu nạp hàng: mua LIÊN TIẾP nhiều stack cho tới khi đủ số lượng còn cần (hoặc đầy kho) rồi mới làm tiếp
+        restockItem = item;
+        restockGoal = Math.max(1, Math.min(remainingNeed(mc, item), Util.freeSpace(mc.player, item)));
+        restockFails = 0;
+        restockWait = 0;
+        restockBusy = buyer.start(mc, item);
         return false;
     }
+
+    private int restockGoal, restockFails, restockWait;
+    private boolean restockBusy;
+    private Item restockItem;
+
+    /** Mỗi tick khi đang nạp hàng: mua tiếp nếu chưa đủ; đủ rồi (hoặc hết cách) thì thôi. */
+    private void restockStep(MinecraftClient mc) {
+        if (restockBusy) {                      // vừa mua xong 1 lần
+            if (buyer.busy()) return;
+            if (restockWait == 0) restockWait = tick + 4;       // chờ server cập nhật kho
+            if (tick < restockWait) return;
+            restockBusy = false;
+            if (buyer.lastSucceeded()) { restockFails = 0; buyTries.remove(restockItem); }
+            else restockFails++;
+        }
+        int have = Util.count(mc.player, restockItem);
+        Item it = restockItem;
+        if (have >= restockGoal || Util.freeSpace(mc.player, it) <= 0) {
+            Util.chat(mc, "Đã đủ §e" + Util.englishName(it) + "§r: có " + have + " (cần nạp " + restockGoal + ").");
+            restockItem = null;
+            return;
+        }
+        if (restockFails >= Math.max(1, Config.buyMaxTries)) {
+            if (have <= 0) { unobtainable.add(it); }
+            Util.chat(mc, "§eKhông mua thêm được §f" + Util.englishName(it) + "§e (có " + have + "/" + restockGoal + ").");
+            restockItem = null;
+            return;
+        }
+        if (spentSinceStart() >= budgetCap) {
+            Util.chat(mc, "§cĐã chạm ngân sách đã đồng ý (" + Util.money(budgetCap) + "). Dừng mua thêm.");
+            Config.autoBuy = false;
+            restockItem = null;
+            return;
+        }
+        restockWait = 0;
+        restockBusy = buyer.start(mc, it);
+    }
+
+    /** Số cái của item còn cần cho các block chưa xây. */
+    private int remainingNeed(MinecraftClient mc, Item item) {
+        WorldSchematic sw = SchematicWorldHandler.getSchematicWorld();
+        if (sw == null) return 1;
+        int n = 0;
+        for (BlockPos pos : targets) {
+            if (blacklist.contains(pos)) continue;
+            BlockState s = sw.getBlockState(pos);
+            StateDiff.Act a = StateDiff.diff(mc.world.getBlockState(pos), s);
+            if (item == Items.WATER_BUCKET) {
+                if (a == StateDiff.Act.WATERLOG
+                        || (a == StateDiff.Act.PLACE && s.contains(Properties.WATERLOGGED) && s.get(Properties.WATERLOGGED))) n++;
+                continue;
+            }
+            if (a != StateDiff.Act.PLACE && a != StateDiff.Act.PLACE_SLAB) continue;
+            ItemStack pk = s.getPickStack(sw, pos, false);
+            Item it = pk.isEmpty() ? s.getBlock().asItem() : pk.getItem();
+            if (it == item) n++;
+        }
+        return Math.max(n, 1);
+    }
+
 
     /** Thiếu vật phẩm mà không mua được: bỏ qua vị trí này, báo 1 lần cho mỗi loại, các vị trí khác cần nó sẽ bị bỏ qua êm. */
     private void skipMissing(MinecraftClient mc, Task t, Item item) {

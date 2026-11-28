@@ -42,6 +42,7 @@ public final class AuctionBuyer {
     private double pendingPrice;
     private int expectPage;     // đang chờ chuyển sang trang này (0 = không chờ)
     private int pagesVisited;
+    private int quoteNeed = 1;
 
     public final List<Listing> listings = new ArrayList<>(); // kết quả báo giá gần nhất
     public double spent;                                      // tổng đã chi (ước tính theo giá niêm yết)
@@ -50,7 +51,9 @@ public final class AuctionBuyer {
     public boolean lastSucceeded() { return lastOk; }
 
     public boolean start(MinecraftClient mc, Item item) { return begin(mc, item, false); }
-    public boolean startQuote(MinecraftClient mc, Item item) { return begin(mc, item, true); }
+    public boolean startQuote(MinecraftClient mc, Item item) { return startQuote(mc, item, 1); }
+    /** need = số lượng cần: lật trang tới khi gom đủ (ưu tiên stack đầy) hoặc hết trang. */
+    public boolean startQuote(MinecraftClient mc, Item item, int need) { quoteNeed = Math.max(1, need); return begin(mc, item, true); }
 
     private boolean begin(MinecraftClient mc, Item item, boolean q) {
         if (busy()) return false;
@@ -121,7 +124,7 @@ public final class AuctionBuyer {
 
                 boolean canNext = canNextPage(h, pg);
                 if (quote) {
-                    if (!pageHasFull && canNext) { clickNext(mc, h, pg); return; }
+                    if (collected(fullSize) < quoteNeed && canNext) { clickNext(mc, h, pg); return; }   // chưa đủ -> trang sau
                     mc.player.closeHandledScreen();
                     lastOk = true;
                     phase = Phase.IDLE;
@@ -161,6 +164,13 @@ public final class AuctionBuyer {
     }
 
 
+
+    /** Tổng số vật phẩm đã gom được trong các trang đã xem (chỉ tính stack đầy nếu bật ưu tiên stack đầy). */
+    private int collected(int fullSize) {
+        int n = 0;
+        for (Listing l : listings) if (!Config.preferFullStack || l.count() >= fullSize) n += l.count();
+        return n;
+    }
 
     /** Bỏ dấu, bỏ mã màu, chữ nhỏ-hoa (ᴛɪᴍ) -> chữ thường không dấu, để so khớp bền với mọi kiểu gõ của server. */
     static String norm(String in) {

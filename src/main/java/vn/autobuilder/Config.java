@@ -96,6 +96,7 @@ public final class Config {
         adjustDelayTicks = Math.max(1, Math.min(40, adjustDelayTicks));
         swapHotbarSlot = Math.max(0, Math.min(8, swapHotbarSlot));
         reach = Math.max(2.5, Math.min(4.0, reach));
+        maxPages = Math.max(30, Math.min(200, maxPages));      // đủ trang để gom đủ số lượng cần
     }
 
     public static void save() {

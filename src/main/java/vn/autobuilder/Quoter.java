@@ -58,17 +58,25 @@ public final class Quoter {
         }
         if (idx >= queue.size()) { st = St.DONE; return; }
         current = queue.get(idx).getKey();
-        buyer.startQuote(mc, current);
+        buyer.startQuote(mc, current, queue.get(idx).getValue());
     }
 
     private void addLine(Item item, int need, AuctionBuyer buyer) {
-        List<AuctionBuyer.Listing> ls = new ArrayList<>(buyer.listings);
-        if (Config.preferFullStack) { // mod chỉ mua stack đầy nếu có
+        List<AuctionBuyer.Listing> all = new ArrayList<>(buyer.listings);
+        Comparator<AuctionBuyer.Listing> byUnit = Comparator.comparingDouble(AuctionBuyer.Listing::unit);
+        List<AuctionBuyer.Listing> ls = new ArrayList<>();
+        if (Config.preferFullStack) {   // stack đầy rẻ nhất trước; thiếu thì mới lấy thêm lẻ (cũng rẻ nhất trước)
             int full = new net.minecraft.item.ItemStack(item).getMaxCount();
-            List<AuctionBuyer.Listing> fulls = ls.stream().filter(l -> l.count() >= full).toList();
-            if (!fulls.isEmpty()) ls = new ArrayList<>(fulls);
+            List<AuctionBuyer.Listing> fulls = new ArrayList<>(), rest = new ArrayList<>();
+            for (AuctionBuyer.Listing l : all) (l.count() >= full ? fulls : rest).add(l);
+            fulls.sort(byUnit);
+            rest.sort(byUnit);
+            ls.addAll(fulls);
+            ls.addAll(rest);
+        } else {
+            all.sort(byUnit);
+            ls = all;
         }
-        ls.sort(Comparator.comparingDouble(AuctionBuyer.Listing::unit));
         int got = 0;
         double cost = 0;
         for (AuctionBuyer.Listing l : ls) {
