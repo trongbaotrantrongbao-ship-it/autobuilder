@@ -41,7 +41,7 @@ public final class ChestManager {
         int fails;
 
         Memo(String dim, BlockPos pos) { this.dim = dim; this.pos = pos; }
-        String key() { return key(dim, pos); }
+        String key() { return ChestManager.key(dim, pos); }
         public boolean emptied() { return scanned && items.isEmpty(); }
     }
 
